@@ -1,0 +1,22 @@
+{
+    "sideloader-config": {
+        "main-slice": "workload.slice",
+        "side-slice": "sideload.slice",
+        "cpu-weight": "1",
+        "cpu-headroom": "15",
+	"cpu-headroom-tolerance": "5",
+	"cpu-min-avail": "15",
+        "memory-high": "50%",
+        "io-weight": "1",
+
+        "overload-cpu-duration": "10",
+        "overload-mempressure-threshold": "5",
+        "overload-hold": "10",
+        "overload-hold-max": "180",
+        "overload-hold-decay-rate": "0.5",
+
+        "critical-swapfree-threshold": "25%",
+        "critical-mempressure-threshold": "75",
+        "critical-iopressure-threshold": "75"
+    }
+}
