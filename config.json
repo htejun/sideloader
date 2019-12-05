@@ -3,9 +3,9 @@
         "main-slice": "workload.slice",
         "side-slice": "sideload.slice",
         "cpu-weight": "1",
-        "cpu-headroom": "15",
+        "cpu-headroom": "25",
 	"cpu-headroom-tolerance": "5",
-	"cpu-min-avail": "15",
+	"cpu-min-avail": "10",
         "memory-high": "50%",
         "io-weight": "1",
 

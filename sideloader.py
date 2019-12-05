@@ -15,6 +15,7 @@ import signal
 # Iterate every second
 interval = 1
 
+USER_HZ = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
 CGRP_BASE = '/sys/fs/cgroup/'
 SL_BASE = '/var/lib/sideloader/'
 SL_PREFIX = 'sideload-'
@@ -104,13 +105,12 @@ def read_lines(path):
 def read_first_line(path):
     return read_lines(path)[0]
 
-def read_cpu_idle():
+def read_cpu_total():
         toks = read_first_line('/proc/stat').split()[1:]
-        idle = int(toks[3]) + int(toks[4])
         total = 0
         for tok in toks:
             total += int(tok)
-        return idle, total
+        return total
 
 def read_mem_swap():
     mem_total = None
@@ -128,6 +128,14 @@ def read_mem_swap():
                 swap_free = int(toks[1]) * 1024
 
     return mem_total, swap_total, swap_free
+
+def read_cgroup_keyed(path):
+    content = {}
+    for line in read_lines(path):
+        toks = line.split()
+        key = toks[0]
+        content[key] = toks[1]
+    return content
 
 def read_cgroup_nested_keyed(path):
     content = {}
@@ -285,7 +293,7 @@ class Job:
 class Sysinfo:
     def __init__(self, pressure_dir, cpu_busy_slots):
         self.pressure_dir = pressure_dir
-        self.cpu_idle_hist = [0] * cpu_busy_slots
+        self.cpu_busy_hist = [0] * cpu_busy_slots
         self.cpu_total_hist = [0] * cpu_busy_slots
         self.cpu_hist_idx = 0
         self.cpu_busy = 0
@@ -298,15 +306,17 @@ class Sysinfo:
         global config
 
         # cpu utilization
-        self.cpu_busy_pct = 0
-        cpu_idle, cpu_total = read_cpu_idle()
-        next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_idle_hist)
-        last_idle = self.cpu_idle_hist[next_idx]
+        self.main_cpu_busy_pct = 0
+        cpu_total = read_cpu_total() / USER_HZ * 1_000_000
+        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}{config.main_slice}/cpu.stat')
+        cpu_busy = float(cpu_stat['usage_usec'])
+        next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_busy_hist)
+        last_busy = self.cpu_busy_hist[next_idx]
         last_total = self.cpu_total_hist[next_idx]
         if last_total and cpu_total > last_total:
-            self.cpu_busy_pct = max(min(1 - (cpu_idle - last_idle) /
-                                        (cpu_total - last_total), 1), 0) * 100
-        self.cpu_idle_hist[next_idx] = cpu_idle
+            self.main_cpu_busy_pct = max(min((cpu_busy - last_busy) /
+                                             (cpu_total - last_total), 1), 0) * 100
+        self.cpu_busy_hist[next_idx] = cpu_busy
         self.cpu_total_hist[next_idx] = cpu_total
         self.cpu_hist_idx = next_idx
 
@@ -343,8 +353,9 @@ class Sysinfo:
         # is overloaded?
         self.overload = True
         cpu_margin = 100 - config.cpu_headroom - config.cpu_min_avail
-        if self.cpu_busy_pct >= cpu_margin:
-            self.overload_why = (f'{config.ov_cpu_dur}s avg cpu util {self.cpu_busy_pct:.2f} '
+        if self.main_cpu_busy_pct >= cpu_margin:
+            self.overload_why = (f'{config.main_slice}\'s {config.ov_cpu_dur}s '
+                                 f'avg cpu util {self.main_cpu_busy_pct:.2f} '
                                  f'is over the headroom margin {cpu_margin}')
         elif self.memp_1min >= config.ov_memp_thr:
             self.overload_why = (f'1min memory pressure {self.memp_1min:.2f} is over '
@@ -551,7 +562,8 @@ def verify_sysconfig():
 
     try:
         main_path = pathlib.Path(f'{CGRP_BASE}{config.main_slice}')
-        for subdir in '', 'workload-tw.slice/', 'workload-tw.slice/*task/':
+        for subdir in ('', 'workload-tw.slice/', 'workload-tw.slice/*.task/',
+                       'workload-tw.slice/*.task/task/'):
             for path in main_path.glob(f'{subdir}memory.low'):
                 low = float_or_max(read_first_line(path), mem_total)
                 if low < mem_total / 3:
@@ -729,7 +741,7 @@ while True:
                         'kill-why': f'{job.kill_why if job.kill_why else ""}',
                       } for jobid, job in jobs.items() ],
             'sysinfo': {
-                'cpu-busy-pct': f'{sysinfo.cpu_busy_pct:.2f}',
+                'main-cpu-busy-pct': f'{sysinfo.main_cpu_busy_pct:.2f}',
                 'mempressure-1min': f'{sysinfo.memp_1min:.2f}',
                 'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
                 'iopressure-1min': f'{sysinfo.iop_1min:.2f}',
