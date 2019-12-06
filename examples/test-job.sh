@@ -2,7 +2,7 @@
 
 cd /root/sideload
 rm -rf linux
-tar xf linux.tar.gz
+tar xvf linux.tar.gz
 cd linux
 make allmodconfig
-make -j16
+make -j32

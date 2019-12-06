@@ -39,8 +39,6 @@ parser.add_argument('--jobdir', default=dfl_job_dir,
                     help='Job input directory (default: %(default)s)')
 parser.add_argument('--status', default=dfl_status_file,
                     help='Status file (default: %(default)s)')
-parser.add_argument('--disable-headroom', action='store_true', default=False,
-                    help='Do not configure cpu.headroom')
 parser.add_argument('--verbose', '-v', action='count')
 
 args = parser.parse_args()
@@ -105,12 +103,13 @@ def read_lines(path):
 def read_first_line(path):
     return read_lines(path)[0]
 
-def read_cpu_total():
+def read_cpu_idle():
         toks = read_first_line('/proc/stat').split()[1:]
+        idle = int(toks[3]) + int(toks[4])
         total = 0
         for tok in toks:
             total += int(tok)
-        return total
+        return idle, total
 
 def read_mem_swap():
     mem_total = None
@@ -182,7 +181,6 @@ class Config:
         self.side_slice = cfg['side-slice']
         self.cpu_weight = int(cfg['cpu-weight'])
         self.cpu_headroom = float(cfg['cpu-headroom'])
-        self.cpu_headroom_tolerance = float(cfg['cpu-headroom-tolerance'])
         self.cpu_min_avail = float(cfg['cpu-min-avail'])
         self.memory_high = parse_size_or_pct(cfg['memory-high'], mem_total)
         self.io_weight = int(cfg['io-weight'])
@@ -291,12 +289,16 @@ class Job:
 
 
 class Sysinfo:
-    def __init__(self, pressure_dir, cpu_busy_slots):
+    def __init__(self, pressure_dir, cpu_idle_slots):
         self.pressure_dir = pressure_dir
-        self.cpu_busy_hist = [0] * cpu_busy_slots
-        self.cpu_total_hist = [0] * cpu_busy_slots
+        self.cpu_idle_hist = [None] * cpu_idle_slots
+        self.cpu_side_hist = [None] * cpu_idle_slots
+        self.cpu_total_hist = [None] * cpu_idle_slots
+        self.cpu_idle_pct_hist = [0] * cpu_idle_slots
         self.cpu_hist_idx = 0
-        self.cpu_busy = 0
+        self.cpu_min_idle = 0
+        self.cpu_avg_idle = 0
+        self.cpu_avg_side = 0
         self.critical = False
         self.critical_why = None
         self.overload = False
@@ -305,18 +307,36 @@ class Sysinfo:
     def update(self):
         global config
 
-        # cpu utilization
-        self.main_cpu_busy_pct = 0
-        cpu_total = read_cpu_total() / USER_HZ * 1_000_000
-        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}/{config.main_slice}/cpu.stat')
-        cpu_busy = float(cpu_stat['usage_usec'])
-        next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_busy_hist)
-        last_busy = self.cpu_busy_hist[next_idx]
-        last_total = self.cpu_total_hist[next_idx]
-        if last_total and cpu_total > last_total:
-            self.main_cpu_busy_pct = max(min((cpu_busy - last_busy) /
-                                             (cpu_total - last_total), 1), 0) * 100
-        self.cpu_busy_hist[next_idx] = cpu_busy
+        # cpu stats
+        self.main_cpu_busy = 0
+        cpu_idle, cpu_total = read_cpu_idle()
+        cpu_idle = cpu_idle / USER_HZ * 1_000_000
+        cpu_total = cpu_total / USER_HZ * 1_000_000
+        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}/{config.side_slice}/cpu.stat')
+        cpu_side = float(cpu_stat['usage_usec'])
+
+        prev_idx = (self.cpu_hist_idx - 1) % len(self.cpu_idle_hist)
+        next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_idle_hist)
+        prev_idle = self.cpu_idle_hist[prev_idx];
+        prev_total = self.cpu_total_hist[prev_idx];
+        oldest_idle = self.cpu_idle_hist[next_idx];
+        oldest_side = self.cpu_side_hist[next_idx];
+        oldest_total = self.cpu_total_hist[next_idx];
+
+        if prev_total is not None and cpu_total > prev_total:
+            self.cpu_idle_pct_hist[self.cpu_hist_idx] = \
+                max(min((cpu_idle - prev_idle) /
+                        (cpu_total - prev_total), 1), 0) * 100
+
+        if oldest_total is not None and cpu_total > oldest_total:
+            self.cpu_avg_idle = max(min((cpu_idle - oldest_idle) /
+                                        (cpu_total - oldest_total), 1), 0) * 100
+            self.cpu_avg_side = max(min((cpu_side - oldest_side) /
+                                        (cpu_total - oldest_total), 1), 0) * 100
+
+        self.cpu_min_idle = min(self.cpu_idle_pct_hist)
+        self.cpu_idle_hist[next_idx] = cpu_idle
+        self.cpu_side_hist[next_idx] = cpu_side
         self.cpu_total_hist[next_idx] = cpu_total
         self.cpu_hist_idx = next_idx
 
@@ -351,13 +371,12 @@ class Sysinfo:
             self.critical_why = False
 
         # is overloaded?
-        self.overload = True
-        cpu_margin = 100 - config.cpu_headroom - config.cpu_min_avail
-        if self.main_cpu_busy_pct >= cpu_margin:
-            self.overload_why = (f'{config.main_slice}\'s {config.ov_cpu_dur}s '
-                                 f'avg cpu util {self.main_cpu_busy_pct:.2f} '
-                                 f'is over the headroom margin {cpu_margin}')
+        side_margin = max(self.cpu_avg_side + self.cpu_avg_idle - config.cpu_headroom, 0)
+        if side_margin < config.cpu_min_avail:
+            self.overload = True
+            self.overload_why = (f'cpu margin {side_margin:.2f} is too low')
         elif self.memp_1min >= config.ov_memp_thr:
+            self.overload = True
             self.overload_why = (f'1min memory pressure {self.memp_1min:.2f} is over '
                                  f'the threshold {config.ov_memp_thr:.2f}')
         else:
@@ -591,14 +610,8 @@ def verify_sysconfig():
                                      f'memory, no idea what to config')
                 else:
                     main_memory_low = low
-
-            for path in main_path.glob(f'{subdir}cpu.headroom'):
-                toks = read_first_line(str(path)).split()
-                if float_or_max(toks[0], 100) != config.cpu_headroom or \
-                   float_or_max(toks[1], 100) != config.cpu_headroom_tolerance:
-                    warns.append(f'{str(path)} is not configured')
     except Exception as e:
-        warns.append(f'failed to check {config.main_slice}/* memory.low and cpu.headroom ({e})')
+        warns.append(f'failed to check {config.main_slice}/* memory.low ({e})')
 
     # verify resource configs in side workload
     side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
@@ -661,13 +674,11 @@ last_syscfg_at = 0
 sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
                   math.ceil(config.ov_cpu_dur / interval))
 
-# Init sideload.slice and configure headroom
+# Init sideload.slice
 subprocess.call(['systemctl', 'set-property', config.side_slice,
                  f'CPUWeight={config.cpu_weight}',
                  f'MemoryHigh={config.memory_high}',
                  f'IOWeight={config.io_weight}'])
-
-config_cpu_headroom()
 
 # List sideload.slice and kill everything which isn't in the jobdir.
 # Don't worry about matching or missing ones, the main loop will
@@ -710,7 +721,7 @@ while True:
 
     # This is configured on the main workload side which may have
     # changed since the last time
-    config_cpu_headroom()
+    #config_cpu_headroom()
 
     # Do syscfg check every once in a while
     if now - last_syscfg_at >= (10 if len(syscfg_warns) else 60):
@@ -784,7 +795,9 @@ while True:
                         'kill-why': f'{job.kill_why if job.kill_why else ""}',
                       } for jobid, job in jobs.items() ],
             'sysinfo': {
-                'main-cpu-busy-pct': f'{sysinfo.main_cpu_busy_pct:.2f}',
+                'cpu-min-idle': f'{sysinfo.cpu_min_idle:.2f}',
+                'cpu-avg-idle': f'{sysinfo.cpu_avg_idle:.2f}',
+                'cpu-avg-side': f'{sysinfo.cpu_avg_side:.2f}',
                 'mempressure-1min': f'{sysinfo.memp_1min:.2f}',
                 'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
                 'iopressure-1min': f'{sysinfo.iop_1min:.2f}',
