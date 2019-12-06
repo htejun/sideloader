@@ -1,0 +1,9 @@
+{
+    "sideloader-jobs": [
+	{
+	    "id": "test-build-job",
+	    "cmd": "chrt -i 0 nice -n 20 /root/sideload/test-job.sh",
+	    "frozen-expiration": "300"
+	}
+    ]
+}
