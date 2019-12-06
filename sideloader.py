@@ -16,13 +16,13 @@ import signal
 interval = 1
 
 USER_HZ = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
-CGRP_BASE = '/sys/fs/cgroup/'
-SL_BASE = '/var/lib/sideloader/'
+CGRP_BASE = '/sys/fs/cgroup'
+SL_BASE = '/var/lib/sideloader'
 SL_PREFIX = 'sideload-'
 SVC_SUFFIX = '.service'
-dfl_cfg_file = SL_BASE + 'config.json'
-dfl_job_dir = SL_BASE + 'jobs.d'
-dfl_status_file = SL_BASE + 'status.json'
+dfl_cfg_file = SL_BASE + '/config.json'
+dfl_job_dir = SL_BASE + '/jobs.d'
+dfl_status_file = SL_BASE + '/status.json'
 
 description = '''
 Resource control side-workload manager. See the following for details.
@@ -237,7 +237,7 @@ class Job:
             self.frozen_at = None
             changed = True
 
-        path = pathlib.Path(f'{CGRP_BASE}{config.side_slice}/{self.svc_name}/cgroup.freeze')
+        path = pathlib.Path(f'{CGRP_BASE}/{config.side_slice}/{self.svc_name}/cgroup.freeze')
         if not path.exists():
             if changed:
                 warn(f'Failed to freeze {self.jobid}')
@@ -253,7 +253,7 @@ class Job:
         if not self.kill_why:
             return
 
-        path = pathlib.Path(f'{CGRP_BASE}{config.side_slice}/{self.svc_name}/cgroup.procs')
+        path = pathlib.Path(f'{CGRP_BASE}/{config.side_slice}/{self.svc_name}/cgroup.procs')
         if not path.exists():
             return
 
@@ -308,7 +308,7 @@ class Sysinfo:
         # cpu utilization
         self.main_cpu_busy_pct = 0
         cpu_total = read_cpu_total() / USER_HZ * 1_000_000
-        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}{config.main_slice}/cpu.stat')
+        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}/{config.main_slice}/cpu.stat')
         cpu_busy = float(cpu_stat['usage_usec'])
         next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_busy_hist)
         last_busy = self.cpu_busy_hist[next_idx]
@@ -374,7 +374,7 @@ def config_cpu_headroom():
         dbg('HEADROOM: disabled, skipping configuration')
         return
 
-    for path in pathlib.Path(f'{CGRP_BASE}{config.main_slice}').rglob('cpu.headroom'):
+    for path in pathlib.Path(f'{CGRP_BASE}/{config.main_slice}').rglob('cpu.headroom'):
         try:
             with path.open('r') as f:
                 line = f.read().strip()
@@ -534,8 +534,18 @@ def verify_sysconfig():
                 warns.append(f'failed to verify iocost for {root_dev} ({e})')
 
     # is freezer available
-    if not os.path.exists(f'{CGRP_BASE}{config.side_slice}/cgroup.freeze'):
+    if not os.path.exists(f'{CGRP_BASE}/{config.side_slice}/cgroup.freeze'):
         warns.append('freezer is not available')
+
+    # is cpu controller enabled?
+    if 'cpu' not in read_first_line(f'{CGRP_BASE}/cgroup.subtree_control'):
+        warns.append('cpu controller not enabled at root, fixing...');
+        try:
+            subprocess.run(['systemctl', 'set-property', '--', '-.slice DisableControllers='])
+            with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
+                f.write('+cpu')
+        except Exception as e:
+            warns.append(f'failed to enable CPU controller in the root cgroup ({e})')
 
     # verify swap and swappiness
     mem_total, swap_total, swap_free = read_mem_swap()
@@ -548,26 +558,39 @@ def verify_sysconfig():
 
     # verify resource configs in main workload
     try:
-        weight = int(read_first_line(f'{CGRP_BASE}{config.main_slice}/cpu.weight'))
+        weight = int(read_first_line(f'{CGRP_BASE}/{config.main_slice}/cpu.weight'))
         if weight < config.cpu_weight * 4:
             warns.append('{config.main_slice} cpu.weight is lower than 4x {config.side_slice}')
     except Exception as e:
         warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
     try:
-        weight = int(read_first_line(f'{CGRP_BASE}{config.main_slice}/io.weight').split()[1])
+        weight = int(read_first_line(f'{CGRP_BASE}/{config.main_slice}/io.weight').split()[1])
         if weight < config.io_weight * 4:
             warns.append('{config.main_slice} io.weight is lower than 4x {config.side_slice}')
     except Exception as e:
         warns.append(f'failed to check {config.main_slice} io.weight ({e})')
 
+    main_memory_low = None
     try:
-        main_path = pathlib.Path(f'{CGRP_BASE}{config.main_slice}')
+        main_path = pathlib.Path(f'{CGRP_BASE}/{config.main_slice}')
         for subdir in ('', 'workload-tw.slice/', 'workload-tw.slice/*.task/',
                        'workload-tw.slice/*.task/task/'):
             for path in main_path.glob(f'{subdir}memory.low'):
-                low = float_or_max(read_first_line(path), mem_total)
+                low = int(float_or_max(read_first_line(path), mem_total))
                 if low < mem_total / 3:
-                    warns.append(f'{str(path)} is lower than a third of system memory')
+                    if main_memory_low:
+                        warns.append(f'{str(path)} is lower than a third of system '
+                                     f'memory, configuring to {main_memory_low}')
+                        try:
+                            with path.open('w') as f:
+                                f.write(f'{main_memory_low}')
+                        except Exception as e:
+                            warns.append(f'failed to set {str(path)} to {main_memory_low} ({e})')
+                    else:
+                        warns.append(f'{str(path)} is lower than a third of system '
+                                     f'memory, no idea what to config')
+                else:
+                    main_memory_low = low
 
             for path in main_path.glob(f'{subdir}cpu.headroom'):
                 toks = read_first_line(str(path)).split()
@@ -578,24 +601,44 @@ def verify_sysconfig():
         warns.append(f'failed to check {config.main_slice}/* memory.low and cpu.headroom ({e})')
 
     # verify resource configs in side workload
+    side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
+    fix_side = False
     try:
-        weight = int(read_first_line(f'{CGRP_BASE}{config.side_slice}/cpu.weight'))
+        weight = int(read_first_line(f'{side_cgrp}/cpu.weight'))
         if weight != config.cpu_weight:
-            warns.append(f'{config.side_slice} cpu.weight is not {config.cpu_weight}')
+            warns.append(f'{config.side_slice} cpu.weight is not {config.cpu_weight}, fixing...')
+            fix_side = True
     except Exception as e:
         warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
     try:
-        high = int(read_first_line(f'{CGRP_BASE}{config.side_slice}/memory.high'))
+        high = int(read_first_line(f'{side_cgrp}/memory.high'))
         if high != config.memory_high:
-            warns.append(f'{config.side_slice} memory.high is not {config.memory.high}')
+            warns.append(f'{config.side_slice} memory.high is not {config.memory.high}, fixing...')
+            fix_side = True
     except Exception as e:
-        warns.append(f'failed to check {config.main_slice} memory.high ({e})')
+        warns.append(f'failed to check {config.side_slice} memory.high ({e})')
     try:
-        weight = int(read_first_line(f'{CGRP_BASE}{config.side_slice}/io.weight').split()[1])
+        weight = int(read_first_line(f'{side_cgrp}/io.weight').split()[1])
         if weight != config.io_weight:
-            warns.append(f'{config.main_slice} io.weight is not {config.io_weight}')
+            warns.append(f'{config.main_slice} io.weight is not {config.io_weight}, fixing...')
+            fix_side = True
     except Exception as e:
         warns.append(f'failed to check {config.side_slice} io.weight ({e})')
+
+    if fix_side:
+        try:
+            subprocess.call(['systemctl', 'set-property', config.side_slice,
+                             f'CPUWeight={config.cpu_weight}',
+                             f'MemoryHigh={config.memory_high}',
+                             f'IOWeight={config.io_weight}'])
+            with open('{side_cgrp}/cpu.weight', 'w') as f:
+                f.write(f'{config.cpu_weight}')
+            with open('{side_cgrp}/memory.high', 'w') as f:
+                f.write(f'{config.memory_high}')
+            with open('{side_cgrp}/io.weight', 'w') as f:
+                f.write(f'{config.io_weight}')
+        except Exception as e:
+            warns.append(f'failed to set {config.side_slice} resource configs ({e})')
 
     return warns
 
@@ -615,7 +658,7 @@ now = time.time()
 syscfg_warns = {}
 last_syscfg_at = 0
 
-sysinfo = Sysinfo(f'{CGRP_BASE}{config.side_slice}',
+sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
                   math.ceil(config.ov_cpu_dur / interval))
 
 # Init sideload.slice and configure headroom
