@@ -11,6 +11,7 @@ import re
 import subprocess
 import datetime
 import signal
+import multiprocessing
 
 # Iterate every second
 interval = 1
@@ -182,6 +183,7 @@ class Config:
         self.cpu_weight = int(cfg['cpu-weight'])
         self.cpu_headroom = float(cfg['cpu-headroom'])
         self.cpu_min_avail = float(cfg['cpu-min-avail'])
+        self.cpu_period_ms = float(cfg['cpu-period-ms'])
         self.memory_high = parse_size_or_pct(cfg['memory-high'], mem_total)
         self.io_weight = int(cfg['io-weight'])
 
@@ -299,6 +301,7 @@ class Sysinfo:
         self.cpu_min_idle = 0
         self.cpu_avg_idle = 0
         self.cpu_avg_side = 0
+        self.cpu_avail = 0
         self.critical = False
         self.critical_why = None
         self.overload = False
@@ -339,6 +342,9 @@ class Sysinfo:
         self.cpu_side_hist[next_idx] = cpu_side
         self.cpu_total_hist[next_idx] = cpu_total
         self.cpu_hist_idx = next_idx
+
+        self.cpu_avail = max(self.cpu_avg_side + self.cpu_min_idle - config.cpu_headroom,
+                             config.cpu_min_avail)
 
         # memory and io pressures
         pres = read_cgroup_nested_keyed(self.pressure_dir + '/memory.pressure')
@@ -386,27 +392,6 @@ class Sysinfo:
 #
 # Implementation
 #
-def config_cpu_headroom():
-    global args, config
-
-    if args.disable_headroom:
-        dbg('HEADROOM: disabled, skipping configuration')
-        return
-
-    for path in pathlib.Path(f'{CGRP_BASE}/{config.main_slice}').rglob('cpu.headroom'):
-        try:
-            with path.open('r') as f:
-                line = f.read().strip()
-                toks = line.split()
-                if (float_or_max(toks[0], 100) != config.cpu_headroom) or \
-                   (float_or_max(toks[1], 100) != config.cpu_headroom_tolerance):
-                    with path.open('w') as f:
-                        ddbg(f'Configuring {str(path)} to {config.cpu_headroom} '
-                             f'{config.cpu_headroom_tolerance}')
-                        f.write(f'{config.cpu_headroom} {config.cpu_headroom_tolerance}')
-        except Exception as e:
-            warn(f'Failed to configure {str(path)} ({e})')
-
 def list_side_services():
     global config
 
@@ -655,6 +640,25 @@ def verify_sysconfig():
 
     return warns
 
+def config_cpu_max(pct):
+    global config
+
+    cpu_max_file = f'{CGRP_BASE}/{config.side_slice}/cpu.max'
+    period = int(config.cpu_period_ms * 1000)
+    quota = int(multiprocessing.cpu_count() * period * pct / 100)
+
+    try:
+        cur_quota, cur_period = read_first_line(cpu_max_file).split()
+        cur_quota = 100 if cur_quota == 'max' else int(cur_quota)
+        cur_period = int(cur_period)
+        if period == cur_period and quota == cur_quota:
+            return
+
+        with open(cpu_max_file, 'w') as f:
+            f.write(f'{quota} {period}')
+    except Exception as e:
+        warn(f'Failed to configure {cpu_max_file} ({e})')
+
 # Run
 config = Config(json.load(open(args.config, 'r'))['sideloader-config'])
 dbg(f'Config: {config.__dict__}')
@@ -719,10 +723,6 @@ while True:
                             f'--unit {job.svc_name} {job.cmd}', shell=True)
         job_queue = {}
 
-    # This is configured on the main workload side which may have
-    # changed since the last time
-    #config_cpu_headroom()
-
     # Do syscfg check every once in a while
     if now - last_syscfg_at >= (10 if len(syscfg_warns) else 60):
         last_syscfg_at = now
@@ -737,7 +737,12 @@ while True:
                 log(f'SYSCFG: All good')
         syscfg_warns = warns
 
+    # Read the current system state
     sysinfo.update()
+
+    # Configure side's cpu.max
+    config_cpu_max(sysinfo.cpu_avail)
+
     # Handle critical condition
     if sysinfo.critical:
         if critical_at is None:
@@ -798,6 +803,7 @@ while True:
                 'cpu-min-idle': f'{sysinfo.cpu_min_idle:.2f}',
                 'cpu-avg-idle': f'{sysinfo.cpu_avg_idle:.2f}',
                 'cpu-avg-side': f'{sysinfo.cpu_avg_side:.2f}',
+                'cpu-avail': f'{sysinfo.cpu_avail:.2f}',
                 'mempressure-1min': f'{sysinfo.memp_1min:.2f}',
                 'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
                 'iopressure-1min': f'{sysinfo.iop_1min:.2f}',

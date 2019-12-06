@@ -5,6 +5,7 @@
         "cpu-weight": "1",
         "cpu-headroom": "15",
 	"cpu-min-avail": "10",
+	"cpu-period-ms": "10",
         "memory-high": "50%",
         "io-weight": "1",
 
