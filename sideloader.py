@@ -180,14 +180,14 @@ class Config:
 
         self.main_slice = cfg['main-slice']
         self.side_slice = cfg['side-slice']
+        self.cpu_period = float(cfg['cpu-period'])
         self.cpu_weight = int(cfg['cpu-weight'])
         self.cpu_headroom = float(cfg['cpu-headroom'])
         self.cpu_min_avail = float(cfg['cpu-min-avail'])
-        self.cpu_period_ms = float(cfg['cpu-period-ms'])
+        self.cpu_throttle_period = float(cfg['cpu-throttle-period'])
         self.memory_high = parse_size_or_pct(cfg['memory-high'], mem_total)
         self.io_weight = int(cfg['io-weight'])
 
-        self.ov_cpu_dur = float(cfg['overload-cpu-duration'])
         self.ov_memp_thr = float(cfg['overload-mempressure-threshold'])
         self.ov_hold = float(cfg['overload-hold'])
         self.ov_hold_max = float(cfg['overload-hold-max'])
@@ -649,7 +649,7 @@ def config_cpu_max(pct):
     global config
 
     cpu_max_file = f'{CGRP_BASE}/{config.side_slice}/cpu.max'
-    period = int(config.cpu_period_ms * 1000)
+    period = int(config.cpu_throttle_period * 1_000_000)
     quota = int(multiprocessing.cpu_count() * period * pct / 100)
 
     try:
@@ -681,7 +681,7 @@ syscfg_warns = {}
 last_syscfg_at = 0
 
 sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
-                  math.ceil(config.ov_cpu_dur / interval))
+                  math.ceil(config.cpu_period / interval))
 
 # Init sideload.slice
 subprocess.call(['systemctl', 'set-property', config.side_slice,
