@@ -394,6 +394,28 @@ class Sysinfo:
             self.overload = False
             self.overload_why = None
 
+class Syschecker:
+    def __init__(self):
+        self.last_check_at = 0
+        self.warns = []
+
+    def check(self, try_fixing, now):
+        self.last_verify_at = now
+        warns = verify_sysconfig(try_fixing)
+        if self.warns != warns:
+            if len(warns):
+                i = 0
+                for w in warns:
+                    warn(f'SYSCFG[{i}]: {w}')
+                    i += 1
+            else:
+                log(f'SYSCFG: All good')
+        self.warns = warns
+
+    def periodic_check(self, intv, try_fixing, now):
+        if now - self.last_check_at >= intv:
+            self.check(try_fixing, now)
+
 #
 # Implementation
 #
@@ -485,7 +507,7 @@ def process_job_dir(jobfiles, jobs, now):
 
     return jobs_to_kill, jobs_to_start
 
-def verify_sysconfig():
+def verify_sysconfig(try_fixing):
     global config
 
     warns = []
@@ -494,6 +516,10 @@ def verify_sysconfig():
     root_dev = None
     root_maj = None
     root_min = None
+
+    fixing_str = ''
+    if try_fixing:
+        fixing_str = ', fixing...'
 
     # is root btrfs?
     for line in read_lines('/proc/mounts'):
@@ -548,13 +574,14 @@ def verify_sysconfig():
 
     # is cpu controller enabled?
     if 'cpu' not in read_first_line(f'{CGRP_BASE}/cgroup.subtree_control'):
-        warns.append('cpu controller not enabled at root, fixing...');
-        try:
-            subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
-            with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
-                f.write('+cpu')
-        except Exception as e:
-            warns.append(f'failed to enable CPU controller in the root cgroup ({e})')
+        warns.append('cpu controller not enabled at root' + fixing_str)
+        if try_fixing:
+            try:
+                #subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
+                with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
+                    f.write('+cpu')
+            except Exception as e:
+                warns.append(f'failed to enable CPU controller in the root cgroup ({e})')
 
     # verify swap and swappiness
     mem_total, swap_total, swap_free = read_mem_swap()
@@ -609,26 +636,26 @@ def verify_sysconfig():
     try:
         weight = int(read_first_line(f'{side_cgrp}/cpu.weight'))
         if weight != config.cpu_weight:
-            warns.append(f'{config.side_slice} cpu.weight is not {config.cpu_weight}, fixing...')
+            warns.append(f'{config.side_slice} cpu.weight is not {config.cpu_weight}' + fixing_str)
             fix_side = True
     except Exception as e:
         warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
     try:
         high = int(read_first_line(f'{side_cgrp}/memory.high'))
         if high != config.memory_high:
-            warns.append(f'{config.side_slice} memory.high is not {config.memory.high}, fixing...')
+            warns.append(f'{config.side_slice} memory.high is not {config.memory.high}' + fixing_str)
             fix_side = True
     except Exception as e:
         warns.append(f'failed to check {config.side_slice} memory.high ({e})')
     try:
         weight = int(read_first_line(f'{side_cgrp}/io.weight').split()[1])
         if weight != config.io_weight:
-            warns.append(f'{config.main_slice} io.weight is not {config.io_weight}, fixing...')
+            warns.append(f'{config.main_slice} io.weight is not {config.io_weight}' + fixing_str)
             fix_side = True
     except Exception as e:
         warns.append(f'failed to check {config.side_slice} io.weight ({e})')
 
-    if fix_side:
+    if try_fixing and fix_side:
         try:
             subprocess.call(['systemctl', 'set-property', config.side_slice,
                              f'CPUWeight={config.cpu_weight}',
@@ -677,11 +704,10 @@ overload_hold = 0
 jobfiles = {}
 jobs = {}
 now = time.time()
-syscfg_warns = {}
-last_syscfg_at = 0
 
 sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
                   math.ceil(config.cpu_period / interval))
+syschecker = Syschecker()
 
 # Init sideload.slice
 subprocess.call(['systemctl', 'set-property', config.side_slice,
@@ -722,6 +748,8 @@ while True:
     job_queue.update(jobs_to_start)
     if not overload_at:
         for jobid, job in job_queue.items():
+            if len(jobs) == 0:
+                syschecker.check(True, now)
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
             subprocess.call(f'systemd-run -r --slice {config.side_slice} '
@@ -729,24 +757,13 @@ while True:
         job_queue = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
-    if now - last_syscfg_at >= (10 if len(jobs) else 60):
-        last_syscfg_at = now
-        warns = verify_sysconfig()
-        if syscfg_warns != warns:
-            if len(warns):
-                i = 0
-                for w in warns:
-                    warn(f'SYSCFG[{i}]: {w}')
-                    i += 1
-            else:
-                log(f'SYSCFG: All good')
-        syscfg_warns = warns
+    syschecker.periodic_check(10 if len(jobs) > 0 else 60, len(jobs) > 0, now)
 
     # Read the current system state
     sysinfo.update()
 
     # Configure side's cpu.max
-    if len(jobs):
+    if len(jobs) > 0:
         config_cpu_max(sysinfo.cpu_avail)
 
     # Handle critical condition
@@ -794,8 +811,8 @@ while True:
     status = {
         'sideloader-status': {
             'now': str(datetime.datetime.fromtimestamp(now)),
-            'sysconfig-warnings-at': str(datetime.datetime.fromtimestamp(last_syscfg_at)),
-            'sysconfig-warnings': syscfg_warns,
+            'sysconfig-warnings-at': str(datetime.datetime.fromtimestamp(syschecker.last_check_at)),
+            'sysconfig-warnings': syschecker.warns,
             'jobs': [ { 'id': jobid,
                         'path' : job.jobfile.path,
                         'service-name': job.svc_name,
