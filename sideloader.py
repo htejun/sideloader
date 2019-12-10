@@ -545,7 +545,7 @@ def verify_sysconfig():
     if 'cpu' not in read_first_line(f'{CGRP_BASE}/cgroup.subtree_control'):
         warns.append('cpu controller not enabled at root, fixing...');
         try:
-            subprocess.run(['systemctl', 'set-property', '--', '-.slice DisableControllers='])
+            subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
             with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
                 f.write('+cpu')
         except Exception as e:
@@ -564,7 +564,7 @@ def verify_sysconfig():
     try:
         weight = int(read_first_line(f'{CGRP_BASE}/{config.main_slice}/cpu.weight'))
         if weight < config.cpu_weight * 4:
-            warns.append('{config.main_slice} cpu.weight is lower than 4x {config.side_slice}')
+            warns.append(f'{config.main_slice} cpu.weight is lower than 4x {config.side_slice}')
     except Exception as e:
         warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
     try:
@@ -629,11 +629,11 @@ def verify_sysconfig():
                              f'CPUWeight={config.cpu_weight}',
                              f'MemoryHigh={config.memory_high}',
                              f'IOWeight={config.io_weight}'])
-            with open('{side_cgrp}/cpu.weight', 'w') as f:
+            with open(f'{side_cgrp}/cpu.weight', 'w') as f:
                 f.write(f'{config.cpu_weight}')
-            with open('{side_cgrp}/memory.high', 'w') as f:
+            with open(f'{side_cgrp}/memory.high', 'w') as f:
                 f.write(f'{config.memory_high}')
-            with open('{side_cgrp}/io.weight', 'w') as f:
+            with open(f'{side_cgrp}/io.weight', 'w') as f:
                 f.write(f'{config.io_weight}')
         except Exception as e:
             warns.append(f'failed to set {config.side_slice} resource configs ({e})')

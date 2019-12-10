@@ -1,0 +1,13 @@
+[Unit]
+Description = Side workload manager
+ConditionFileIsExecutable = /var/lib/sideloader/sideloader.py
+
+[Service]
+ExecStart = /var/lib/sideloader/sideloader.py
+Restart=always
+MemoryMin=32M
+MemoryLow=32M
+Slice=hostcritical.slice
+
+[Install]
+WantedBy=multi-user.target
