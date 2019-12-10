@@ -302,6 +302,11 @@ class Sysinfo:
         self.cpu_avg_idle = 0
         self.cpu_avg_side = 0
         self.cpu_avail = 0
+        self.memp_1min = 0
+        self.memp_5min = 0
+        self.iop_1min = 0
+        self.iop_5min = 0
+        self.swap_free_pct = 100
         self.critical = False
         self.critical_why = None
         self.overload = False
@@ -741,7 +746,8 @@ while True:
     sysinfo.update()
 
     # Configure side's cpu.max
-    config_cpu_max(sysinfo.cpu_avail)
+    if len(jobs):
+        config_cpu_max(sysinfo.cpu_avail)
 
     # Handle critical condition
     if sysinfo.critical:
