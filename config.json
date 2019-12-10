@@ -9,7 +9,7 @@
         "memory-high": "50%",
         "io-weight": "1",
 
-        "overload-cpu-duration": "10",
+        "overload-cpu-duration": "5",
         "overload-mempressure-threshold": "5",
         "overload-hold": "10",
         "overload-hold-max": "180",
