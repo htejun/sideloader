@@ -723,8 +723,8 @@ while True:
                             f'--unit {job.svc_name} {job.cmd}', shell=True)
         job_queue = {}
 
-    # Do syscfg check every once in a while
-    if now - last_syscfg_at >= (10 if len(syscfg_warns) else 60):
+    # Do syscfg check every 10 secs
+    if now - last_syscfg_at >= 10:
         last_syscfg_at = now
         warns = verify_sysconfig()
         if syscfg_warns != warns:
