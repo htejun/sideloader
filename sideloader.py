@@ -729,7 +729,7 @@ while True:
         job_queue = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
-    if now - last_syscfg_at >= 10 if len(jobs) else 60:
+    if now - last_syscfg_at >= (10 if len(jobs) else 60):
         last_syscfg_at = now
         warns = verify_sysconfig()
         if syscfg_warns != warns:
