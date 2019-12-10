@@ -1,7 +1,7 @@
 #!/bin/bash
 
 set -xe
-yum -y install openssl-devel
+yum -y install gcc bison flex openssl-devel
 cd /root/sideload
 rm -rf linux
 tar xvf linux.tar.gz
