@@ -12,6 +12,8 @@ import subprocess
 import datetime
 import signal
 import multiprocessing
+import subprocess
+import platform
 
 # Iterate every second
 interval = 1
@@ -24,6 +26,7 @@ SVC_SUFFIX = '.service'
 dfl_cfg_file = SL_BASE + '/config.json'
 dfl_job_dir = SL_BASE + '/jobs.d'
 dfl_status_file = SL_BASE + '/status.json'
+dfl_scribe_file = SL_BASE + '/scribe.json'
 systemd_root_override_file = '/etc/systemd/system/-.slice.d/zz-sideloader-disable-controller-override.conf'
 
 description = '''
@@ -41,6 +44,8 @@ parser.add_argument('--jobdir', default=dfl_job_dir,
                     help='Job input directory (default: %(default)s)')
 parser.add_argument('--status', default=dfl_status_file,
                     help='Status file (default: %(default)s)')
+parser.add_argument('--scribe', default=dfl_scribe_file,
+                    help='Scribe input file (default: %(default)s)')
 parser.add_argument('--verbose', '-v', action='count')
 
 args = parser.parse_args()
@@ -203,6 +208,13 @@ class Config:
             parse_size_or_pct(cfg['critical-swapfree-threshold'], swap_total)
         self.crit_memp_thr = float(cfg['critical-mempressure-threshold'])
         self.crit_iop_thr = float(cfg['critical-iopressure-threshold'])
+
+        if 'scribe-category' in cfg:
+            self.scribe_category = cfg['scribe-category']
+            self.scribe_interval = float(cfg['scribe-interval'])
+        else:
+            self.scribe_category = None
+            self.scribe_interval = 1
 
 class JobFile:
     def __init__(self, ino, path, fh):
@@ -720,6 +732,28 @@ class Syschecker:
 
         self.active = active
 
+class Scriber:
+    def __init__(self, cat, intv):
+        self.category = cat
+        self.interval = intv
+        self.last_at = 0
+        self.scribe_proc = None
+
+    def should_log(self, now):
+        if int(now) - int(self.last_at) < self.interval:
+            return False
+
+        if self.scribe_proc and self.scribe_proc.poll() is None:
+            return False
+
+        return True
+
+    def log(self, msg, now):
+        self.last_at = now
+        if self.scribe_proc:
+            self.scribe_proc.wait()
+        self.scribe_proc = subprocess.Popen(['scribe_cat', self.category, msg])
+
 #
 # Implementation
 #
@@ -811,12 +845,19 @@ def process_job_dir(jobfiles, jobs, now):
 
     return jobs_to_kill, jobs_to_start
 
-def has_active_jobs(jobs):
+def count_active_jobs(jobs):
     count = 0
     for jobid, job in jobs.items():
         if job.frozen_at is None and not job.done:
-            return True
-    return False
+            count += 1
+    return count
+
+def count_frozen_jobs(jobs):
+    count = 0
+    for jobid, job in jobs.items():
+        if job.frozen_at is not None:
+            count += 1
+    return count
 
 def config_cpu_max(pct):
     global config
@@ -855,6 +896,11 @@ now = time.time()
 sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
                   math.ceil(config.cpu_period / interval))
 syschecker = Syschecker()
+
+if config.scribe_category:
+    scriber = Scriber(config.scribe_category, config.scribe_interval)
+else:
+    scriber = None
 
 # Init sideload.slice
 subprocess.call(['systemctl', 'set-property', config.side_slice,
@@ -897,7 +943,7 @@ while True:
         for jobid, job in job_queue.items():
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
-            syschecker.update_active(has_active_jobs(jobs))
+            syschecker.update_active(count_active_jobs(jobs))
             subprocess.call(f'systemd-run -r --slice {config.side_slice} '
                             f'--unit {job.svc_name} {job.cmd}', shell=True)
         job_queue = {}
@@ -954,7 +1000,7 @@ while True:
         job.maybe_kill()
         job.refresh_status(now)
 
-    syschecker.update_active(has_active_jobs(jobs))
+    syschecker.update_active(count_active_jobs(jobs))
 
     status = {
         'sideloader-status': {
@@ -991,5 +1037,33 @@ while True:
         }
     }
     dump_json(status, args.status)
+
+    if scriber and scriber.should_log(now):
+        sstatus = {
+            'int': {
+                'time': int(now),
+                'critical': critical_at is not None,
+                'overload': overload_at is not None,
+                'nr-jobs': len(jobs),
+                'nr-active-jobs': count_active_jobs(jobs),
+                'nr-frozen-jobs': count_frozen_jobs(jobs),
+            },
+            'float': {
+                'cpu-min-idle': sysinfo.cpu_min_idle,
+                'cpu-avg-idle': sysinfo.cpu_avg_idle,
+                'cpu-avg-side': sysinfo.cpu_avg_side,
+                'cpu-avail': sysinfo.cpu_avail,
+                'mempressure-1min': sysinfo.memp_1min,
+                'mempressure-5min': sysinfo.memp_5min,
+                'iopressure-1min': sysinfo.iop_1min,
+                'iopressure-5min': sysinfo.iop_5min,
+                'swap-free-pct': sysinfo.swap_free_pct,
+            },
+            'normal': {
+                'hostname': platform.node(),
+            },
+        }
+        dump_json(sstatus, args.scribe)
+        scriber.log(json.dumps(sstatus), now)
 
     time.sleep(interval)

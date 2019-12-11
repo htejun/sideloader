@@ -24,6 +24,9 @@
 
         "critical-swapfree-threshold": "25%",
         "critical-mempressure-threshold": "75",
-        "critical-iopressure-threshold": "75"
+        "critical-iopressure-threshold": "75",
+
+	"scribe-category": "perfpipe_htejun_resctl_sideload",
+	"scribe-interval": "10"
     }
 }
