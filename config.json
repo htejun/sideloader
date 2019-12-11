@@ -7,8 +7,8 @@
 	"main-cpu-weight": "100",
         "host-cpu-weight": "10",
 	"side-cpu-weight": "1",
-	"main-io-weight": "100",
-	"host-io-weight": "10",
+	"main-io-weight": "400",
+	"host-io-weight": "100",
 	"side-io-weight": "1",
         "side-memory-high": "50%",
 

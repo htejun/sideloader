@@ -24,6 +24,7 @@ SVC_SUFFIX = '.service'
 dfl_cfg_file = SL_BASE + '/config.json'
 dfl_job_dir = SL_BASE + '/jobs.d'
 dfl_status_file = SL_BASE + '/status.json'
+systemd_root_override_file = '/etc/systemd/system/-.slice.d/zz-sideloader-disable-controller-override.conf'
 
 description = '''
 Resource control side-workload manager. See the following for details.
@@ -407,6 +408,7 @@ class Syschecker:
         self.host_cgrp = f'{CGRP_BASE}/{config.host_slice}'
         self.side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
 
+        self.active = False
         self.last_check_at = 0
         self.last_warns = []
         self.warns = []
@@ -646,7 +648,7 @@ class Syschecker:
         self.fixed |= len(warns) == 0
         return warns
 
-    def __check(self, has_jobs, now):
+    def __check(self, now):
         global config
 
         self.last_check_at = now
@@ -663,7 +665,7 @@ class Syschecker:
         warns = self.__check_cpu_weights()
         # Enabling CPU controller carries significant overhead.  Fix
         # it iff there are active side jobs.
-        if len(warns) and has_jobs:
+        if len(warns) and self.active:
             warns.append('Fixing cpu.weights')
             warns += self.__fix_cpu_weights()
         self.warns += warns
@@ -682,17 +684,41 @@ class Syschecker:
                     warn(f'SYSCFG[{i}]: {w}')
                     i += 1
             else:
-                log(f'SYSCFG: All good')
+                log(f'SYSCFG: all good')
 
-    def check(self, has_jobs, now):
+    def check(self, now):
         self.fixed = False
-        self.__check(has_jobs, now)
+        self.__check(now)
         if self.fixed:
-            self.__check(has_jobs, now)
+            self.__check(now)
 
-    def periodic_check(self, intv, has_jobs, now):
+    def periodic_check(self, intv, now):
         if now - self.last_check_at >= intv:
-            self.check(has_jobs, now)
+            self.check(now)
+
+    def update_active(self, active):
+        active = bool(active)
+        if self.active == active:
+            return
+
+        if active:
+            log('SYSCFG: overriding root slice DisableControllers')
+            try:
+                with open(systemd_root_override_file, 'w') as f:
+                    f.write('[Slice]\n'
+                            'DisableControllers=\n')
+                subprocess.call(['systemctl', 'daemon-reload'])
+            except Exception as e:
+                warn(f'SYSCFG: failed to overried root slice DisableControllers ({e})')
+        else:
+            log('SYSCFG: reverting root slice DisableControllers')
+            try:
+                os.remove(systemd_root_override_file)
+                subprocess.call(['systemctl', 'daemon-reload'])
+            except Exception as e:
+                warn(f'SYSCFG: failed to revert root slice DisableControllers ({e})')
+
+        self.active = active
 
 #
 # Implementation
@@ -785,6 +811,13 @@ def process_job_dir(jobfiles, jobs, now):
 
     return jobs_to_kill, jobs_to_start
 
+def has_active_jobs(jobs):
+    count = 0
+    for jobid, job in jobs.items():
+        if job.frozen_at is None and not job.done:
+            return True
+    return False
+
 def config_cpu_max(pct):
     global config
 
@@ -810,6 +843,7 @@ dbg(f'Config: {config.__dict__}')
 log(f'INIT: sideloads in {config.side_slice}, main workloads in {config.main_slice}')
 
 job_queue = {}
+nr_active = 0
 critical_at = None
 overload_at = None
 overload_hold_from = 0
@@ -848,29 +882,28 @@ if len(svcs_to_stop):
 while True:
     last = now
     now = time.time()
-
     # Handle job starts and stops
     jobs_to_kill, jobs_to_start = process_job_dir(jobfiles, jobs, now)
-    svcs_to_stop = []
+
     for jobid, job in jobs_to_kill.items():
         log(f'JOB: Stopping {job.svc_name}')
         subprocess.run(['systemctl', 'stop', job.svc_name])
         subprocess.run(['systemctl', 'reset-failed', job.svc_name])
         del jobs[jobid]
+
     # Start new jobs iff not overloaded
     job_queue.update(jobs_to_start)
     if not overload_at:
         for jobid, job in job_queue.items():
-            if len(jobs) == 0:
-                syschecker.check(True, now)
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
+            syschecker.update_active(has_active_jobs(jobs))
             subprocess.call(f'systemd-run -r --slice {config.side_slice} '
                             f'--unit {job.svc_name} {job.cmd}', shell=True)
         job_queue = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
-    syschecker.periodic_check(10 if len(jobs) > 0 else 60, len(jobs) > 0, now)
+    syschecker.periodic_check(10 if len(jobs) > 0 else 60, now)
 
     # Read the current system state
     sysinfo.update()
@@ -920,6 +953,8 @@ while True:
     for jobid, job in jobs.items():
         job.maybe_kill()
         job.refresh_status(now)
+
+    syschecker.update_active(has_active_jobs(jobs))
 
     status = {
         'sideloader-status': {
