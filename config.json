@@ -14,7 +14,7 @@
 
         "cpu-period": "5",
         "cpu-headroom": "10",
-        "cpu-min-avail": "10",
+        "cpu-min-avail": "15",
         "cpu-throttle-period": "0.01",
 
         "overload-mempressure-threshold": "5",

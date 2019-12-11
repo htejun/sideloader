@@ -954,10 +954,6 @@ while True:
     # Read the current system state
     sysinfo.update()
 
-    # Configure side's cpu.max
-    if len(jobs) > 0:
-        config_cpu_max(sysinfo.cpu_avail)
-
     # Handle critical condition
     if sysinfo.critical:
         if critical_at is None:
@@ -967,7 +963,7 @@ while True:
         overload_reason = 'resource critical'
         overload_hold = config.ov_hold_max
         for jobid, job in jobs.items():
-            job.kill('resource critical')
+            job.kill(f'resource critical {sysinfo.critical_why}')
     else:
         critical_at = None
 
@@ -995,12 +991,20 @@ while True:
         for jobid, job in jobs.items():
             job.update_frozen(False, now)
 
-    # Update job status and report
+    # Process frozen timeouts
     for jobid, job in jobs.items():
         job.maybe_kill()
-        job.refresh_status(now)
 
-    syschecker.update_active(count_active_jobs(jobs))
+    # Configure side's cpu.max and update active state
+    nr_active = count_active_jobs(jobs)
+    if nr_active > 0:
+        config_cpu_max(sysinfo.cpu_avail)
+
+    syschecker.update_active(nr_active)
+
+    # Refresh service status and report
+    for jobid, job in jobs.items():
+        job.refresh_status(now)
 
     status = {
         'sideloader-status': {
@@ -1045,7 +1049,7 @@ while True:
                 'critical': critical_at is not None,
                 'overload': overload_at is not None,
                 'nr-jobs': len(jobs),
-                'nr-active-jobs': count_active_jobs(jobs),
+                'nr-active-jobs': nr_active,
                 'nr-frozen-jobs': count_frozen_jobs(jobs),
             },
             'float': {
