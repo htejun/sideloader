@@ -179,14 +179,19 @@ class Config:
         mem_total, swap_total, swap_free = read_mem_swap()
 
         self.main_slice = cfg['main-slice']
+        self.host_slice = cfg['host-slice']
         self.side_slice = cfg['side-slice']
+        self.main_cpu_weight = int(cfg['main-cpu-weight'])
+        self.host_cpu_weight = int(cfg['host-cpu-weight'])
+        self.side_cpu_weight = int(cfg['side-cpu-weight'])
+        self.main_io_weight = int(cfg['main-io-weight'])
+        self.host_io_weight = int(cfg['host-io-weight'])
+        self.side_io_weight = int(cfg['side-io-weight'])
+        self.side_memory_high = parse_size_or_pct(cfg['side-memory-high'], mem_total)
         self.cpu_period = float(cfg['cpu-period'])
-        self.cpu_weight = int(cfg['cpu-weight'])
         self.cpu_headroom = float(cfg['cpu-headroom'])
         self.cpu_min_avail = float(cfg['cpu-min-avail'])
         self.cpu_throttle_period = float(cfg['cpu-throttle-period'])
-        self.memory_high = parse_size_or_pct(cfg['memory-high'], mem_total)
-        self.io_weight = int(cfg['io-weight'])
 
         self.ov_memp_thr = float(cfg['overload-mempressure-threshold'])
         self.ov_hold = float(cfg['overload-hold'])
@@ -396,25 +401,298 @@ class Sysinfo:
 
 class Syschecker:
     def __init__(self):
+        global config
+
+        self.main_cgrp = f'{CGRP_BASE}/{config.main_slice}'
+        self.host_cgrp = f'{CGRP_BASE}/{config.host_slice}'
+        self.side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
+
         self.last_check_at = 0
+        self.last_warns = []
+        self.warns = []
+        self.fixed = False
+
+        self.root_dev = None
+        self.root_min = None
+        self.root_min = None
+        self.mem_total = 0
+        self.swap_total = 0
+        self.swap_free = 0
+        self.swappiness = 0
+
+        # find the root device maj/min
+        root_part = None
+        for line in read_lines('/proc/mounts'):
+            toks = line.split()
+            if toks[1] == '/':
+                if toks[0].startswith('/dev/'):
+                    root_part = toks[0][len('/dev/'):]
+                break
+        if root_part is None:
+            warn('SYSCFG: failed to find root mount')
+            return
+
+        if root_part.startswith('sd'):
+            self.root_dev = re.sub(r'^(sd[^0-9]*)[0-9]*$', r'\1', root_part)
+        elif root_part.startswith('nvme'):
+            self.root_dev = re.sub(r'^(nvme[^p]*)(p[0-9])?$', r'\1', root_part)
+        else:
+            raise Exception(f'unknown device')
+
+        try:
+            out = subprocess.run(['stat', '-c', '0x%t 0x%T', f'/dev/{self.root_dev}'],
+                                 stdout=subprocess.PIPE).stdout.decode('utf-8')
+            toks = out.split()
+            self.root_maj = int(toks[0], 0)
+            self.root_min = int(toks[1], 0)
+        except Exception as e:
+            warn(f'SYSCFG: failed to find root device ({e})')
+
+    def __check_rootfs(self):
+        for line in read_lines('/proc/mounts'):
+            toks = line.split()
+            if toks[1] == '/':
+                if toks[2] == 'btrfs':
+                    return []
+                else:
+                    return ['root filesystem is not btrfs']
+
+    def __check_memswap(self):
+        self.mem_total, self.swap_total, self.swap_free = read_mem_swap()
+        warns = []
+        if self.swap_total < 0.9 * (self.mem_total / 2):
+            warns.append('swap is smaller than half of physical memory')
+
+        self.swappiness = int(read_first_line('/proc/sys/vm/swappiness'))
+        if self.swappiness < 60:
+            warns.append('swappiness ({self.swappiness}) is lower than default 60')
+
+        return warns
+
+    def __check_freezer(self):
+        global config
+
+        if not os.path.exists(f'{self.side_cgrp}/cgroup.freeze'):
+            return ['freezer is not available']
+        return []
+
+    def __check_and_fix_main_memory_low(self):
+        global config
+        warns = []
+
+        main_memory_low = None
+        try:
+            main_path = pathlib.Path(self.main_cgrp)
+            for subdir in ('', 'workload-tw.slice/', 'workload-tw.slice/*.task/',
+                           'workload-tw.slice/*.task/task/'):
+                for path in main_path.glob(f'{subdir}memory.low'):
+                    low = int(float_or_max(read_first_line(path), self.mem_total))
+                    if low < self.mem_total / 3:
+                        if main_memory_low:
+                            warns.append(f'{str(path)} is lower than a third of system '
+                                         f'memory, configuring to {main_memory_low}')
+                            try:
+                                with path.open('w') as f:
+                                    f.write(f'{main_memory_low}')
+                            except Exception as e:
+                                warns.append(f'failed to set {str(path)} to {main_memory_low} ({e})')
+                            else:
+                                self.fixed = True
+                        else:
+                            warns.append(f'{str(path)} is lower than a third of system '
+                                         f'memory, no idea what to config')
+                    else:
+                        main_memory_low = low
+        except Exception as e:
+            warns.append(f'failed to check {config.main_slice}/* memory.low ({e})')
+
+        return warns
+
+    def __check_and_fix_side_memory_high(self):
+        global config
+        warns = []
+        try:
+            high = int(read_first_line(f'{self.side_cgrp}/memory.high'))
+            if high >> 20 != config.side_memory_high >> 20:
+                warns.append(f'{config.side_slice} memory.high is not {config.side_memory_high}')
+        except Exception as e:
+            warns.append(f'failed to check {config.side_slice} memory.high ({e})')
+
+        try:
+            subprocess.call(['systemctl', 'set-property', config.side_slice,
+                             f'MemoryHigh={config.side_memory_high}'])
+            with open(f'{self.side_cgrp}/memory.high', 'w') as f:
+                f.write(f'{config.side_memory_high}')
+        except Exception as e:
+            warns.append(f'failed to set {config.side_slice} resource configs ({e})')
+        else:
+            self.fixed = True
+        return warns
+
+    def __check_weight(self, slice, knob, weight, prefix=None):
+        try:
+            line = read_first_line(f'{CGRP_BASE}/{slice}/{knob}')
+            if prefix:
+                line = line.split()[1]
+            weight = int(line)
+        except Exception as e:
+            return[f'failed to check {slice}/{knob} ({e})']
+
+        if weight == weight:
+            return []
+        else:
+            return [f'{slice}/{knob} != {weight}']
+
+    def __update_weight(self, slice, knob, weight, systemd_key=None, prefix=None):
+        try:
+            with open(f'{CGRP_BASE}/{slice}/{knob}', 'w') as f:
+                if prefix:
+                    f.write(f'{prefix} {weight}')
+                else:
+                    f.write(f'{weight}')
+        except Exception as e:
+            return[f'failed to set {slice}/{knob} to {weight} ({e})']
+
+        if systemd_key:
+            try:
+                subprocess.call(['systemctl', 'set-property', slice,
+                                 f'{systemd_key}={weight}'])
+            except Exception as e:
+                return [f'failed to set {slice} {systemd_key} to {weight} ({e})']
+
+        return []
+
+    def __check_cpu_weights(self):
+        global config
+
+        if 'cpu' not in read_first_line(f'{CGRP_BASE}/cgroup.subtree_control'):
+            return['cpu controller not enabled at root']
+
+        warns = []
+        warns += self.__check_weight(config.main_slice, 'cpu.weight',
+                                     config.main_cpu_weight)
+        warns += self.__check_weight(config.host_slice, 'cpu.weight',
+                                     config.host_cpu_weight)
+        warns += self.__check_weight(config.side_slice, 'cpu.weight',
+                                     config.side_cpu_weight)
+        return warns
+
+    def __fix_cpu_weights(self):
+        global config
+
+        try:
+            #subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
+            with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
+                f.write('+cpu')
+        except Exception as e:
+            return [f'failed to enable CPU controller in the root cgroup ({e})']
+
+        warns = []
+        warns += self.__update_weight(config.main_slice, 'cpu.weight',
+                                      config.main_cpu_weight, 'CPUWeight')
+        warns += self.__update_weight(config.host_slice, 'cpu.weight',
+                                      config.host_cpu_weight, 'CPUWeight')
+        warns += self.__update_weight(config.side_slice, 'cpu.weight',
+                                      config.side_cpu_weight, 'CPUWeight')
+        self.fixed |= len(warns) == 0
+        return warns
+
+    def __check_io_weights(self):
+        global config
+
+        if self.root_maj is None or self.root_min is None:
+            return [f'failed to find devnr for {root_part}']
+
+        try:
+            enabled = False
+            for line in read_lines(f'{CGRP_BASE}/io.cost.qos'):
+                toks = line.split()
+                devnr = toks[0].split(':')
+                if self.root_maj == int(devnr[0]) and self.root_min == int(devnr[1]):
+                    for t in toks:
+                        if t == 'enable=1':
+                            enabled = True
+                            break
+                    break
+        except Exception as e:
+            return [f'failed to verify iocost for {self.root_dev} ({e})']
+
+        if not enabled:
+            return [f'iocost not enabled on {self.root_dev}']
+
+        warns = []
+        warns += self.__check_weight(config.main_slice, 'io.weight',
+                                     config.main_io_weight, 'default')
+        warns += self.__check_weight(config.host_slice, 'io.weight',
+                                     config.host_io_weight, 'default')
+        warns += self.__check_weight(config.side_slice, 'io.weight',
+                                     config.side_io_weight, 'default')
+        return warns
+
+    def __fix_io_weights(self):
+        try:
+            with open(f'{CGRP_BASE}/io.cost.qos', 'w') as f:
+                f.write(f'{self.root_maj}:{self.root_min} enable=1')
+        except Exception as e:
+            return [f'failed to enable iocost for {self.root_dev} ({e})']
+
+        warns = []
+        warns += self.__update_weight(config.main_slice, 'io.weight',
+                                      config.main_io_weight, 'IOWeight', 'default')
+        warns += self.__update_weight(config.host_slice, 'io.weight',
+                                      config.host_io_weight, 'IOWeight', 'default')
+        warns += self.__update_weight(config.side_slice, 'io.weight',
+                                      config.side_io_weight, 'IOWeight', 'default')
+        self.fixed |= len(warns) == 0
+        return warns
+
+    def __check(self, has_jobs, now):
+        global config
+
+        self.last_check_at = now
+        self.last_warns = self.warns
         self.warns = []
 
-    def check(self, try_fixing, now):
-        self.last_verify_at = now
-        warns = verify_sysconfig(try_fixing)
-        if self.warns != warns:
-            if len(warns):
+        # run the checks and fixes
+        self.warns += self.__check_rootfs()
+        self.warns += self.__check_memswap()
+        self.warns += self.__check_freezer()
+        self.warns += self.__check_and_fix_main_memory_low()
+        self.warns += self.__check_and_fix_side_memory_high()
+
+        warns = self.__check_cpu_weights()
+        # Enabling CPU controller carries significant overhead.  Fix
+        # it iff there are active side jobs.
+        if len(warns) and has_jobs:
+            warns.append('Fixing cpu.weights')
+            warns += self.__fix_cpu_weights()
+        self.warns += warns
+
+        warns = self.__check_io_weights()
+        if len(warns):
+            warns.append('Fixing io.weights')
+            warns += self.__fix_io_weights()
+        self.warns += warns
+
+        # log if changed
+        if self.warns != self.last_warns:
+            if len(self.warns):
                 i = 0
-                for w in warns:
+                for w in self.warns:
                     warn(f'SYSCFG[{i}]: {w}')
                     i += 1
             else:
                 log(f'SYSCFG: All good')
-        self.warns = warns
 
-    def periodic_check(self, intv, try_fixing, now):
+    def check(self, has_jobs, now):
+        self.fixed = False
+        self.__check(has_jobs, now)
+        if self.fixed:
+            self.__check(has_jobs, now)
+
+    def periodic_check(self, intv, has_jobs, now):
         if now - self.last_check_at >= intv:
-            self.check(try_fixing, now)
+            self.check(has_jobs, now)
 
 #
 # Implementation
@@ -507,171 +785,6 @@ def process_job_dir(jobfiles, jobs, now):
 
     return jobs_to_kill, jobs_to_start
 
-def verify_sysconfig(try_fixing):
-    global config
-
-    warns = []
-
-    root_part = None
-    root_dev = None
-    root_maj = None
-    root_min = None
-
-    fixing_str = ''
-    if try_fixing:
-        fixing_str = ', fixing...'
-
-    # is root btrfs?
-    for line in read_lines('/proc/mounts'):
-        toks = line.split()
-        if toks[1] == '/':
-            if toks[2] != 'btrfs':
-                warns.append('root filesystem is not btrfs')
-            if toks[0].startswith('/dev/'):
-                root_part = toks[0][len('/dev/'):]
-            break
-
-    # is iocost enabled?
-    if root_part is None:
-        warns.append('failed to find root device')
-    else:
-        if root_part.startswith('sd'):
-            root_dev = re.sub(r'^(sd[^0-9]*)[0-9]*$', r'\1', root_part)
-        elif root_part.startswith('nvme'):
-            root_dev = re.sub(r'^(nvme[^p]*)(p[0-9])?$', r'\1', root_part)
-        else:
-            raise Exception(f'unknown device')
-
-        try:
-            out = subprocess.run(['stat', '-c', '0x%t 0x%T', f'/dev/{root_dev}'],
-                                 stdout=subprocess.PIPE).stdout.decode('utf-8')
-            toks = out.split()
-            root_maj = int(toks[0], 0)
-            root_min = int(toks[1], 0)
-        except Exception as e:
-            warns.append(f'failed to find devnr for {root_part} ({e})')
-        else:
-            try:
-                enabled = False
-                for line in read_lines('/sys/fs/cgroup/io.cost.qos'):
-                    toks = line.split()
-                    devnr = toks[0].split(':')
-                    if root_maj == int(devnr[0]) and root_min == int(devnr[1]):
-                        for t in toks:
-                            if t == 'enable=1':
-                                enabled = True
-                                break
-                        break
-
-                if not enabled:
-                    warns.append(f'iocost not enabled on {root_dev}')
-            except Exception as e:
-                warns.append(f'failed to verify iocost for {root_dev} ({e})')
-
-    # is freezer available
-    if not os.path.exists(f'{CGRP_BASE}/{config.side_slice}/cgroup.freeze'):
-        warns.append('freezer is not available')
-
-    # is cpu controller enabled?
-    if 'cpu' not in read_first_line(f'{CGRP_BASE}/cgroup.subtree_control'):
-        warns.append('cpu controller not enabled at root' + fixing_str)
-        if try_fixing:
-            try:
-                #subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
-                with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
-                    f.write('+cpu')
-            except Exception as e:
-                warns.append(f'failed to enable CPU controller in the root cgroup ({e})')
-
-    # verify swap and swappiness
-    mem_total, swap_total, swap_free = read_mem_swap()
-    if swap_total < 0.9 * (mem_total / 2):
-        warns.append('swap is smaller than half of physical memory')
-
-    swappiness = int(read_first_line('/proc/sys/vm/swappiness'))
-    if swappiness < 60:
-        warns.append('swappiness ({swappiness}) is lower than default 60')
-
-    # verify resource configs in main workload
-    try:
-        weight = int(read_first_line(f'{CGRP_BASE}/{config.main_slice}/cpu.weight'))
-        if weight < config.cpu_weight * 4:
-            warns.append(f'{config.main_slice} cpu.weight is lower than 4x {config.side_slice}')
-    except Exception as e:
-        warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
-    try:
-        weight = int(read_first_line(f'{CGRP_BASE}/{config.main_slice}/io.weight').split()[1])
-        if weight < config.io_weight * 4:
-            warns.append('{config.main_slice} io.weight is lower than 4x {config.side_slice}')
-    except Exception as e:
-        warns.append(f'failed to check {config.main_slice} io.weight ({e})')
-
-    main_memory_low = None
-    try:
-        main_path = pathlib.Path(f'{CGRP_BASE}/{config.main_slice}')
-        for subdir in ('', 'workload-tw.slice/', 'workload-tw.slice/*.task/',
-                       'workload-tw.slice/*.task/task/'):
-            for path in main_path.glob(f'{subdir}memory.low'):
-                low = int(float_or_max(read_first_line(path), mem_total))
-                if low < mem_total / 3:
-                    if main_memory_low:
-                        warns.append(f'{str(path)} is lower than a third of system '
-                                     f'memory, configuring to {main_memory_low}')
-                        try:
-                            with path.open('w') as f:
-                                f.write(f'{main_memory_low}')
-                        except Exception as e:
-                            warns.append(f'failed to set {str(path)} to {main_memory_low} ({e})')
-                    else:
-                        warns.append(f'{str(path)} is lower than a third of system '
-                                     f'memory, no idea what to config')
-                else:
-                    main_memory_low = low
-    except Exception as e:
-        warns.append(f'failed to check {config.main_slice}/* memory.low ({e})')
-
-    # verify resource configs in side workload
-    side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
-    fix_side = False
-    try:
-        weight = int(read_first_line(f'{side_cgrp}/cpu.weight'))
-        if weight != config.cpu_weight:
-            warns.append(f'{config.side_slice} cpu.weight is not {config.cpu_weight}' + fixing_str)
-            fix_side = True
-    except Exception as e:
-        warns.append(f'failed to check {config.main_slice} cpu.weight ({e})')
-    try:
-        high = int(read_first_line(f'{side_cgrp}/memory.high'))
-        if high != config.memory_high:
-            warns.append(f'{config.side_slice} memory.high is not {config.memory.high}' + fixing_str)
-            fix_side = True
-    except Exception as e:
-        warns.append(f'failed to check {config.side_slice} memory.high ({e})')
-    try:
-        weight = int(read_first_line(f'{side_cgrp}/io.weight').split()[1])
-        if weight != config.io_weight:
-            warns.append(f'{config.main_slice} io.weight is not {config.io_weight}' + fixing_str)
-            fix_side = True
-    except Exception as e:
-        warns.append(f'failed to check {config.side_slice} io.weight ({e})')
-
-    if try_fixing and fix_side:
-        try:
-            subprocess.call(['systemctl', 'set-property', config.side_slice,
-                             f'CPUWeight={config.cpu_weight}',
-                             f'MemoryHigh={config.memory_high}',
-                             f'IOWeight={config.io_weight}'])
-            with open(f'{side_cgrp}/cpu.weight', 'w') as f:
-                f.write(f'{config.cpu_weight}')
-            with open(f'{side_cgrp}/memory.high', 'w') as f:
-                f.write(f'{config.memory_high}')
-            with open(f'{side_cgrp}/io.weight', 'w') as f:
-                f.write(f'{config.io_weight}')
-        except Exception as e:
-            warns.append(f'failed to set {config.side_slice} resource configs ({e})')
-
-    return warns
-
 def config_cpu_max(pct):
     global config
 
@@ -711,9 +824,9 @@ syschecker = Syschecker()
 
 # Init sideload.slice
 subprocess.call(['systemctl', 'set-property', config.side_slice,
-                 f'CPUWeight={config.cpu_weight}',
-                 f'MemoryHigh={config.memory_high}',
-                 f'IOWeight={config.io_weight}'])
+                 f'CPUWeight={config.side_cpu_weight}',
+                 f'MemoryHigh={config.side_memory_high}',
+                 f'IOWeight={config.side_io_weight}'])
 
 # List sideload.slice and kill everything which isn't in the jobdir.
 # Don't worry about matching or missing ones, the main loop will

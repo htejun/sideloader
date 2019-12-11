@@ -1,14 +1,21 @@
 {
     "sideloader-config": {
         "main-slice": "workload.slice",
+	"host-slice": "hostcritical.slice",
         "side-slice": "sideload.slice",
+
+	"main-cpu-weight": "100",
+        "host-cpu-weight": "10",
+	"side-cpu-weight": "1",
+	"main-io-weight": "100",
+	"host-io-weight": "10",
+	"side-io-weight": "1",
+        "side-memory-high": "50%",
+
         "cpu-period": "5",
-        "cpu-weight": "1",
         "cpu-headroom": "10",
         "cpu-min-avail": "10",
         "cpu-throttle-period": "0.01",
-        "memory-high": "50%",
-        "io-weight": "1",
 
         "overload-mempressure-threshold": "5",
         "overload-hold": "10",
