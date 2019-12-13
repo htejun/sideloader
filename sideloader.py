@@ -883,13 +883,13 @@ config = Config(json.load(open(args.config, 'r'))['sideloader-config'])
 dbg(f'Config: {config.__dict__}')
 log(f'INIT: sideloads in {config.side_slice}, main workloads in {config.main_slice}')
 
-job_queue = {}
 nr_active = 0
 critical_at = None
 overload_at = None
 overload_hold_from = 0
 overload_hold = 0
 jobfiles = {}
+jobs_pending = {}
 jobs = {}
 now = time.time()
 
@@ -938,15 +938,15 @@ while True:
         del jobs[jobid]
 
     # Start new jobs iff not overloaded
-    job_queue.update(jobs_to_start)
+    jobs_pending.update(jobs_to_start)
     if not overload_at:
-        for jobid, job in job_queue.items():
+        for jobid, job in jobs_pending.items():
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
             syschecker.update_active(count_active_jobs(jobs))
             subprocess.call(f'systemd-run -r --slice {config.side_slice} '
                             f'--unit {job.svc_name} {job.cmd}', shell=True)
-        job_queue = {}
+        jobs_pending = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
     syschecker.periodic_check(10 if len(jobs) > 0 else 60, now)
@@ -1011,15 +1011,20 @@ while True:
             'now': str(datetime.datetime.fromtimestamp(now)),
             'sysconfig-warnings-at': str(datetime.datetime.fromtimestamp(syschecker.last_check_at)),
             'sysconfig-warnings': syschecker.warns,
-            'jobs': [ { 'id': jobid,
-                        'path' : job.jobfile.path,
-                        'service-name': job.svc_name,
-                        'service-status': job.svc_status,
-                        'frozen-for': time_interval_str(job.frozen_at, now),
-                        'is-killed': f'{int(job.killed)}',
-                        'is-done': f'{int(job.done)}',
-                        'kill-why': f'{job.kill_why if job.kill_why else ""}',
-                      } for jobid, job in jobs.items() ],
+            'jobs': [ {
+                'id': jobid,
+                'path' : job.jobfile.path,
+                'service-name': job.svc_name,
+                'service-status': job.svc_status,
+                'frozen-for': time_interval_str(job.frozen_at, now),
+                'is-killed': f'{int(job.killed)}',
+                'is-done': f'{int(job.done)}',
+                'kill-why': f'{job.kill_why if job.kill_why else ""}',
+            } for jobid, job in jobs.items() ],
+            'jobs-pending': [ {
+                'id': jobid,
+                'path': job.jobfile.path,
+            } for jobid, job in jobs_pending.items() ],
             'sysinfo': {
                 'cpu-min-idle': f'{sysinfo.cpu_min_idle:.2f}',
                 'cpu-avg-idle': f'{sysinfo.cpu_avg_idle:.2f}',
@@ -1051,6 +1056,7 @@ while True:
                 'nr-jobs': len(jobs),
                 'nr-active-jobs': nr_active,
                 'nr-frozen-jobs': count_frozen_jobs(jobs),
+                'nr-pending-jobs': len(jobs_pending),
             },
             'float': {
                 'cpu-min-idle': sysinfo.cpu_min_idle,

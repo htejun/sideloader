@@ -13,12 +13,12 @@
         "side-memory-high": "50%",
 
         "cpu-period": "5",
-        "cpu-headroom": "10",
+        "cpu-headroom": "15",
         "cpu-min-avail": "15",
         "cpu-throttle-period": "0.01",
 
         "overload-mempressure-threshold": "5",
-        "overload-hold": "10",
+        "overload-hold": "15",
         "overload-hold-max": "180",
         "overload-hold-decay-rate": "0.5",
 
