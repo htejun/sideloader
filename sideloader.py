@@ -118,10 +118,11 @@ def read_cpu_idle():
             total += int(tok)
         return idle, total
 
-def read_mem_swap():
+def read_meminfo():
     mem_total = None
     swap_total = None
     swap_free = None
+    hugetlb = None
 
     with open('/proc/meminfo', 'r', encoding='utf-8') as f:
         for line in f:
@@ -132,8 +133,10 @@ def read_mem_swap():
                 swap_total = int(toks[1]) * 1024
             elif toks[0] == 'SwapFree:':
                 swap_free = int(toks[1]) * 1024
+            elif toks[0] == 'Hugetlb:':
+                hugetlb = int(toks[1]) * 1024
 
-    return mem_total, swap_total, swap_free
+    return mem_total, swap_total, swap_free, hugetlb
 
 def read_cgroup_keyed(path):
     content = {}
@@ -182,7 +185,7 @@ def time_interval_str(at, now):
 #
 class Config:
     def __init__(self, cfg):
-        mem_total, swap_total, swap_free = read_mem_swap()
+        mem_total, swap_total, swap_free, hugetlb = read_meminfo()
 
         self.main_slice = cfg['main-slice']
         self.host_slice = cfg['host-slice']
@@ -379,7 +382,7 @@ class Sysinfo:
         self.iop_5min = float(pres['full']['avg300'])
 
         # swap
-        mem_total, self.swap_total, self.swap_free = read_mem_swap()
+        mem_total, self.swap_total, self.swap_free, huge_tlb = read_meminfo()
         self.swap_free_pct = 100
         if self.swap_total:
             self.swap_free_pct = self.swap_free / self.swap_total * 100
@@ -432,6 +435,7 @@ class Syschecker:
         self.swap_total = 0
         self.swap_free = 0
         self.swappiness = 0
+        self.hugetlb = 0
 
         # find the root device maj/min
         root_part = None
@@ -485,7 +489,7 @@ class Syschecker:
         return ['async discard disabled on root fs, enabled']
 
     def __check_memswap(self):
-        self.mem_total, self.swap_total, self.swap_free = read_mem_swap()
+        self.mem_total, self.swap_total, self.swap_free, self.hugetlb = read_meminfo()
         warns = []
         if self.swap_total < 0.9 * (self.mem_total / 2):
             warns.append('swap is smaller than half of physical memory')
@@ -530,7 +534,7 @@ class Syschecker:
                            'workload-tw.slice/*.task/task/'):
                 for path in main_path.glob(f'{subdir}memory.low'):
                     low = int(float_or_max(read_first_line(path), self.mem_total))
-                    if low < self.mem_total / 3:
+                    if low < (self.mem_total - self.hugetlb) / 3:
                         if main_memory_low:
                             warns.append(f'{str(path)} is lower than a third of system '
                                          f'memory, configuring to {main_memory_low}')
