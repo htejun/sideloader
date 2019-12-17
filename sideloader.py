@@ -462,14 +462,29 @@ class Syschecker:
         except Exception as e:
             warn(f'SYSCFG: failed to find root device ({e})')
 
-    def __check_rootfs(self):
+    def __check_and_fix_rootfs(self):
+        toks = None
         for line in read_lines('/proc/mounts'):
             toks = line.split()
             if toks[1] == '/':
-                if toks[2] == 'btrfs':
-                    return []
-                else:
-                    return ['root filesystem is not btrfs']
+                break
+
+        if toks is None or toks[1] != '/':
+            return ['failed to find root fs mount entry']
+
+        if toks[2] != 'btrfs':
+            return ['root filesystem is not btrfs']
+
+        if 'discard=async' in toks[3]:
+            return []
+
+        try:
+            subprocess.check_call(['mount', '-o', 'remount,discard=async', '/'])
+        except Exception as e:
+            return [f'failed to enable async discard on root fs ({e})']
+
+        self.fixed = True
+        return ['async discard disabled on root fs, enabled']
 
     def __check_memswap(self):
         self.mem_total, self.swap_total, self.swap_free = read_mem_swap()
@@ -533,8 +548,8 @@ class Syschecker:
             warns.append(f'failed to check {config.side_slice} memory.high ({e})')
 
         try:
-            subprocess.call(['systemctl', 'set-property', config.side_slice,
-                             f'MemoryHigh={config.side_memory_high}'])
+            subprocess.check_call(['systemctl', 'set-property', config.side_slice,
+                                   f'MemoryHigh={config.side_memory_high}'])
             with open(f'{self.side_cgrp}/memory.high', 'w') as f:
                 f.write(f'{config.side_memory_high}')
         except Exception as e:
@@ -569,8 +584,8 @@ class Syschecker:
 
         if systemd_key:
             try:
-                subprocess.call(['systemctl', 'set-property', slice,
-                                 f'{systemd_key}={weight}'])
+                subprocess.check_call(['systemctl', 'set-property', slice,
+                                       f'{systemd_key}={weight}'])
             except Exception as e:
                 return [f'failed to set {slice} {systemd_key} to {weight} ({e})']
 
@@ -595,7 +610,6 @@ class Syschecker:
         global config
 
         try:
-            #subprocess.run(['systemctl', 'set-property', '--', '-.slice', 'DisableControllers='])
             with open(f'{CGRP_BASE}/cgroup.subtree_control', 'w') as f:
                 f.write('+cpu')
         except Exception as e:
@@ -668,7 +682,7 @@ class Syschecker:
         self.warns = []
 
         # run the checks and fixes
-        self.warns += self.__check_rootfs()
+        self.warns += self.__check_and_fix_rootfs()
         self.warns += self.__check_memswap()
         self.warns += self.__check_freezer()
         self.warns += self.__check_and_fix_main_memory_low()
@@ -719,14 +733,14 @@ class Syschecker:
                 with open(systemd_root_override_file, 'w') as f:
                     f.write('[Slice]\n'
                             'DisableControllers=\n')
-                subprocess.call(['systemctl', 'daemon-reload'])
+                subprocess.check_call(['systemctl', 'daemon-reload'])
             except Exception as e:
                 warn(f'SYSCFG: failed to overried root slice DisableControllers ({e})')
         else:
             log('SYSCFG: reverting root slice DisableControllers')
             try:
                 os.remove(systemd_root_override_file)
-                subprocess.call(['systemctl', 'daemon-reload'])
+                subprocess.check_call(['systemctl', 'daemon-reload'])
             except Exception as e:
                 warn(f'SYSCFG: failed to revert root slice DisableControllers ({e})')
 
@@ -903,10 +917,10 @@ else:
     scriber = None
 
 # Init sideload.slice
-subprocess.call(['systemctl', 'set-property', config.side_slice,
-                 f'CPUWeight={config.side_cpu_weight}',
-                 f'MemoryHigh={config.side_memory_high}',
-                 f'IOWeight={config.side_io_weight}'])
+subprocess.check_call(['systemctl', 'set-property', config.side_slice,
+                       f'CPUWeight={config.side_cpu_weight}',
+                       f'MemoryHigh={config.side_memory_high}',
+                       f'IOWeight={config.side_io_weight}'])
 
 # List sideload.slice and kill everything which isn't in the jobdir.
 # Don't worry about matching or missing ones, the main loop will
@@ -944,8 +958,8 @@ while True:
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
             syschecker.update_active(count_active_jobs(jobs))
-            subprocess.call(f'systemd-run -r --slice {config.side_slice} '
-                            f'--unit {job.svc_name} {job.cmd}', shell=True)
+            subprocess.run(f'systemd-run -r --slice {config.side_slice} '
+                           f'--unit {job.svc_name} {job.cmd}', shell=True)
         jobs_pending = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s

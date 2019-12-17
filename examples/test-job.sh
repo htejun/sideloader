@@ -7,4 +7,4 @@ rm -rf linux
 tar xvf linux.tar.gz
 cd linux
 make allmodconfig
-make -j32
+make -j64
