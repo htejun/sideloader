@@ -427,8 +427,7 @@ class Syschecker:
         self.fixed = False
 
         self.root_dev = None
-        self.root_min = None
-        self.root_min = None
+        self.root_devnr = None
         self.mem_total = 0
         self.swap_total = 0
         self.swap_free = 0
@@ -457,8 +456,7 @@ class Syschecker:
             out = subprocess.run(['stat', '-c', '0x%t 0x%T', f'/dev/{self.root_dev}'],
                                  stdout=subprocess.PIPE).stdout.decode('utf-8')
             toks = out.split()
-            self.root_maj = int(toks[0], 0)
-            self.root_min = int(toks[1], 0)
+            self.root_devnr = f'{int(toks[0], 0)}:{int(toks[1], 0)}'
         except Exception as e:
             warn(f'SYSCFG: failed to find root device ({e})')
 
@@ -504,6 +502,22 @@ class Syschecker:
         if not os.path.exists(f'{self.side_cgrp}/cgroup.freeze'):
             return ['freezer is not available']
         return []
+
+    def __check_and_fix_io_latency_off(self):
+        warns = []
+        root_path = pathlib.Path(CGRP_BASE)
+        for path in root_path.glob('**/io.latency'):
+            try:
+                latcfg = read_cgroup_nested_keyed(path)
+                if self.root_devnr not in latcfg:
+                    continue
+                warns.append(f'{str(path)} has non-null config, fixing...')
+                with path.open('w') as f:
+                    f.write(f'{self.root_devnr} target=0')
+                self.fixed = True
+            except Exception as e:
+                warns.append(f'failed to check and disable {str(path)} ({e})')
+        return warns
 
     def __check_and_fix_main_memory_low(self):
         global config
@@ -628,15 +642,14 @@ class Syschecker:
     def __check_io_weights(self):
         global config
 
-        if self.root_maj is None or self.root_min is None:
+        if self.root_devnr is None:
             return [f'failed to find devnr for {root_part}']
 
         try:
             enabled = False
             for line in read_lines(f'{CGRP_BASE}/io.cost.qos'):
                 toks = line.split()
-                devnr = toks[0].split(':')
-                if self.root_maj == int(devnr[0]) and self.root_min == int(devnr[1]):
+                if self.root_devnr == toks[0]:
                     for t in toks:
                         if t == 'enable=1':
                             enabled = True
@@ -660,7 +673,7 @@ class Syschecker:
     def __fix_io_weights(self):
         try:
             with open(f'{CGRP_BASE}/io.cost.qos', 'w') as f:
-                f.write(f'{self.root_maj}:{self.root_min} enable=1')
+                f.write(f'{self.root_devnr} enable=1')
         except Exception as e:
             return [f'failed to enable iocost for {self.root_dev} ({e})']
 
@@ -685,6 +698,7 @@ class Syschecker:
         self.warns += self.__check_and_fix_rootfs()
         self.warns += self.__check_memswap()
         self.warns += self.__check_freezer()
+        self.warns += self.__check_and_fix_io_latency_off()
         self.warns += self.__check_and_fix_main_memory_low()
         self.warns += self.__check_and_fix_side_memory_high()
 
