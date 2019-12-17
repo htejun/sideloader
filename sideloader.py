@@ -976,8 +976,9 @@ while True:
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
             syschecker.update_active(count_active_jobs(jobs))
-            subprocess.run(f'systemd-run -r --slice {config.side_slice} '
-                           f'--unit {job.svc_name} {job.cmd}', shell=True)
+            subprocess.run(['systemd-run', '-r', '-p', 'TimeoutStopSec=5',
+                            '--slice', config.side_slice,
+                            '--unit', job.svc_name, job.cmd])
         jobs_pending = {}
 
     # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
