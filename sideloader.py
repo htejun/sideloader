@@ -310,19 +310,13 @@ class Job:
             self.done = True
             self.killed = True
 
-
-class Sysinfo:
-    def __init__(self, pressure_dir, cpu_idle_slots):
+class SysInfo:
+    def __init__(self, pressure_dir, nr_hist_intvs):
         self.pressure_dir = pressure_dir
-        self.cpu_idle_hist = [None] * cpu_idle_slots
-        self.cpu_side_hist = [None] * cpu_idle_slots
-        self.cpu_total_hist = [None] * cpu_idle_slots
-        self.cpu_idle_pct_hist = [0] * cpu_idle_slots
+        self.cpu_total_hist = [None] * (nr_hist_intvs + 1)
+        self.cpu_idle_hist = [None] * (nr_hist_intvs + 1)
+        self.cpu_side_hist = [None] * (nr_hist_intvs + 1)
         self.cpu_hist_idx = 0
-        self.cpu_min_idle = 0
-        self.cpu_avg_idle = 0
-        self.cpu_avg_side = 0
-        self.cpu_avail = 0
         self.memp_1min = 0
         self.memp_5min = 0
         self.iop_1min = 0
@@ -337,40 +331,17 @@ class Sysinfo:
         global config
 
         # cpu stats
-        self.main_cpu_busy = 0
         cpu_idle, cpu_total = read_cpu_idle()
-        cpu_idle = cpu_idle / USER_HZ * 1_000_000
         cpu_total = cpu_total / USER_HZ * 1_000_000
+        cpu_idle = cpu_idle / USER_HZ * 1_000_000
         cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}/{config.side_slice}/cpu.stat')
         cpu_side = float(cpu_stat['usage_usec'])
 
-        prev_idx = (self.cpu_hist_idx - 1) % len(self.cpu_idle_hist)
         next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_idle_hist)
-        prev_idle = self.cpu_idle_hist[prev_idx];
-        prev_total = self.cpu_total_hist[prev_idx];
-        oldest_idle = self.cpu_idle_hist[next_idx];
-        oldest_side = self.cpu_side_hist[next_idx];
-        oldest_total = self.cpu_total_hist[next_idx];
-
-        if prev_total is not None and cpu_total > prev_total:
-            self.cpu_idle_pct_hist[self.cpu_hist_idx] = \
-                max(min((cpu_idle - prev_idle) /
-                        (cpu_total - prev_total), 1), 0) * 100
-
-        if oldest_total is not None and cpu_total > oldest_total:
-            self.cpu_avg_idle = max(min((cpu_idle - oldest_idle) /
-                                        (cpu_total - oldest_total), 1), 0) * 100
-            self.cpu_avg_side = max(min((cpu_side - oldest_side) /
-                                        (cpu_total - oldest_total), 1), 0) * 100
-
-        self.cpu_min_idle = min(self.cpu_idle_pct_hist)
+        self.cpu_total_hist[next_idx] = cpu_total
         self.cpu_idle_hist[next_idx] = cpu_idle
         self.cpu_side_hist[next_idx] = cpu_side
-        self.cpu_total_hist[next_idx] = cpu_total
         self.cpu_hist_idx = next_idx
-
-        self.cpu_avail = max(self.cpu_avg_side + self.cpu_min_idle - config.cpu_headroom,
-                             config.cpu_min_avail)
 
         # memory and io pressures
         pres = read_cgroup_nested_keyed(self.pressure_dir + '/memory.pressure')
@@ -387,35 +358,54 @@ class Sysinfo:
         if self.swap_total:
             self.swap_free_pct = self.swap_free / self.swap_total * 100
 
-        # is critical?
-        self.critical = True
-        if self.swap_free <= config.crit_swapfree_thr:
-            self.critical_why = (f'swap-free {self.swap_free>>20}MB is lower than '
-                                 f'critical threshold {config.crit_swapfree_thr>>20}MB')
-        elif self.memp_5min >= config.crit_memp_thr:
-            self.critical_why = (f'5min memory pressure {self.memp_5min:.2f} is higher than '
-                                 f'critical threshold {config.crit_memp_thr:.2f}')
-        elif self.iop_5min >= config.crit_iop_thr:
-            self.critical_why = (f'5min io pressure {self.iop_5min:.2f} is higher than '
-                                 f'critical threshold {config.crit_iop_thr:.2f}')
+    def __cpu_lridx(self, nr_intvs):
+        assert nr_intvs > 0 and nr_intvs < len(self.cpu_idle_hist)
+        ridx = self.cpu_hist_idx
+        lidx = (ridx - nr_intvs) % len(self.cpu_idle_hist)
+        if self.cpu_total_hist[lidx] is not None:
+            return lidx, ridx
         else:
-            self.critical = False
-            self.critical_why = False
+            return None, None
 
-        # is overloaded?
-        side_margin = max(self.cpu_avg_side + self.cpu_avg_idle - config.cpu_headroom, 0)
-        if side_margin < config.cpu_min_avail:
-            self.overload = True
-            self.overload_why = (f'cpu margin {side_margin:.2f} is too low')
-        elif self.memp_1min >= config.ov_memp_thr:
-            self.overload = True
-            self.overload_why = (f'1min memory pressure {self.memp_1min:.2f} is over '
-                                 f'the threshold {config.ov_memp_thr:.2f}')
-        else:
-            self.overload = False
-            self.overload_why = None
+    def __cpu_avg(self, hist, nr_intvs):
+        lidx, ridx = self.__cpu_lridx(nr_intvs)
+        if lidx is None:
+            return 0
+        total = self.cpu_total_hist[ridx] - self.cpu_total_hist[lidx]
+        delta = hist[ridx] - hist[lidx]
+        return min(max(delta / total * 100, 0), 100)
 
-class Syschecker:
+    def __cpu_min_max(self, hist, nr_intvs):
+        pct_min = 100
+        pct_max = 0
+        idx, ridx = self.__cpu_lridx(nr_intvs)
+        if idx is None:
+            return 0, 0
+
+        while idx != ridx:
+            nidx = (idx + 1) % len(self.cpu_idle_hist)
+            total = self.cpu_total_hist[nidx] - self.cpu_total_hist[idx]
+            delta = hist[nidx] - hist[idx]
+            pct = min(max(delta / total * 100, 0), 100)
+            pct_min = min(pct_min, pct)
+            pct_max = max(pct_max, pct)
+            idx = nidx
+
+        return pct_min, pct_max
+
+    def cpu_avg_idle(self, nr_intvs):
+        return self.__cpu_avg(self.cpu_idle_hist, nr_intvs)
+
+    def cpu_min_max_idle(self, nr_intvs):
+        return self.__cpu_min_max(self.cpu_idle_hist, nr_intvs)
+
+    def cpu_avg_side(self, nr_intvs):
+        return self.__cpu_avg(self.cpu_side_hist, nr_intvs)
+
+    def cpu_min_max_side(self, nr_intvs):
+        return self.__cpu_min_max(self.cpu_side_hist, nr_intvs)
+
+class SysChecker:
     def __init__(self):
         global config
 
@@ -917,17 +907,19 @@ log(f'INIT: sideloads in {config.side_slice}, main workloads in {config.main_sli
 
 nr_active = 0
 critical_at = None
+critical_why = None
 overload_at = None
 overload_hold_from = 0
 overload_hold = 0
+overload_why = None
 jobfiles = {}
 jobs_pending = {}
 jobs = {}
 now = time.time()
 
-sysinfo = Sysinfo(f'{CGRP_BASE}/{config.side_slice}',
-                  math.ceil(config.cpu_period / interval))
-syschecker = Syschecker()
+nr_cpu_hist_intvs = math.ceil(config.cpu_period / interval)
+sysinfo = SysInfo(f'{CGRP_BASE}/{config.side_slice}', nr_cpu_hist_intvs)
+syschecker = SysChecker()
 
 if config.scribe_category:
     scriber = Scriber(config.scribe_category, config.scribe_interval)
@@ -987,24 +979,51 @@ while True:
     # Read the current system state
     sysinfo.update()
 
+    cpu_avg_idle = sysinfo.cpu_avg_idle(nr_cpu_hist_intvs)
+    cpu_min_idle, cpu_max_idle = sysinfo.cpu_min_max_idle(nr_cpu_hist_intvs)
+    cpu_avg_side = sysinfo.cpu_avg_side(nr_cpu_hist_intvs)
+    cpu_avail = max(cpu_avg_side + cpu_min_idle - config.cpu_headroom,
+                    config.cpu_min_avail)
+
     # Handle critical condition
-    if sysinfo.critical:
+    if sysinfo.swap_free <= config.crit_swapfree_thr:
+        critical_why = (f'swap-free {self.swap_free>>20}MB is lower than '
+                        f'critical threshold {config.crit_swapfree_thr>>20}MB')
+    elif sysinfo.memp_5min >= config.crit_memp_thr:
+        critical_why = (f'5min memory pressure {self.memp_5min:.2f} is higher than '
+                        f'critical threshold {config.crit_memp_thr:.2f}')
+    elif sysinfo.iop_5min >= config.crit_iop_thr:
+        critical_why = (f'5min io pressure {self.iop_5min:.2f} is higher than '
+                        f'critical threshold {config.crit_iop_thr:.2f}')
+    else:
+        critical_why = None
+
+    if critical_why is not None:
         if critical_at is None:
             crtical_at = now
         if overload_at is None:
             overload_at = now
-        overload_reason = 'resource critical'
+        overload_why = 'resource critical'
         overload_hold = config.ov_hold_max
         for jobid, job in jobs.items():
-            job.kill(f'resource critical {sysinfo.critical_why}')
+            job.kill(f'resource critical {critical_why}')
     else:
         critical_at = None
 
     # Handle overload condition
-    if sysinfo.overload:
+    side_margin = max(cpu_avg_side + cpu_avg_idle - config.cpu_headroom, 0)
+    if side_margin < config.cpu_min_avail:
+        overload_why = (f'cpu margin {side_margin:.2f} is too low')
+    elif sysinfo.memp_1min >= config.ov_memp_thr:
+        overload_why = (f'1min memory pressure {self.memp_1min:.2f} is over '
+                        f'the threshold {config.ov_memp_thr:.2f}')
+    else:
+        overload_why = None
+
+    if overload_why is not None:
         # Log if we're just getting overloaded
         if not overload_at:
-            log(f'OVERLOAD: {sysinfo.overload_why}, hold={int(overload_hold)}s')
+            log(f'OVERLOAD: {overload_why}, hold={int(overload_hold)}s')
             overload_at = now
             overload_hold = min(config.ov_hold + overload_hold, config.ov_hold_max)
         overload_hold_from = now
@@ -1031,7 +1050,7 @@ while True:
     # Configure side's cpu.max and update active state
     nr_active = count_active_jobs(jobs)
     if nr_active > 0:
-        config_cpu_max(sysinfo.cpu_avail)
+        config_cpu_max(cpu_avail)
 
     syschecker.update_active(nr_active)
 
@@ -1059,10 +1078,10 @@ while True:
                 'path': job.jobfile.path,
             } for jobid, job in jobs_pending.items() ],
             'sysinfo': {
-                'cpu-min-idle': f'{sysinfo.cpu_min_idle:.2f}',
-                'cpu-avg-idle': f'{sysinfo.cpu_avg_idle:.2f}',
-                'cpu-avg-side': f'{sysinfo.cpu_avg_side:.2f}',
-                'cpu-avail': f'{sysinfo.cpu_avail:.2f}',
+                'cpu-min-idle': f'{cpu_min_idle:.2f}',
+                'cpu-avg-idle': f'{cpu_avg_idle:.2f}',
+                'cpu-avg-side': f'{cpu_avg_side:.2f}',
+                'cpu-avail': f'{cpu_avail:.2f}',
                 'mempressure-1min': f'{sysinfo.memp_1min:.2f}',
                 'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
                 'iopressure-1min': f'{sysinfo.iop_1min:.2f}',
@@ -1073,8 +1092,8 @@ while True:
                 'critical-for': time_interval_str(critical_at, now),
                 'overload-for': time_interval_str(overload_at, now),
                 'overload-hold': f'{max(overload_hold_from + overload_hold - now, 0):.2f}',
-                'critical-why': f'{sysinfo.critical_why if sysinfo.critical_why else ""}',
-                'overload-why': f'{sysinfo.overload_why if sysinfo.overload_why else ""}',
+                'critical-why': f'{critical_why if critical_why else ""}',
+                'overload-why': f'{overload_why if overload_why else ""}',
             }
         }
     }
@@ -1092,10 +1111,10 @@ while True:
                 'nr-pending-jobs': len(jobs_pending),
             },
             'float': {
-                'cpu-min-idle': sysinfo.cpu_min_idle,
-                'cpu-avg-idle': sysinfo.cpu_avg_idle,
-                'cpu-avg-side': sysinfo.cpu_avg_side,
-                'cpu-avail': sysinfo.cpu_avail,
+                'cpu-min-idle': cpu_min_idle,
+                'cpu-avg-idle': cpu_avg_idle,
+                'cpu-avg-side': cpu_avg_side,
+                'cpu-avail': cpu_avail,
                 'mempressure-1min': sysinfo.memp_1min,
                 'mempressure-5min': sysinfo.memp_5min,
                 'iopressure-1min': sysinfo.iop_1min,
