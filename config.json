@@ -1,32 +1,35 @@
 {
     "sideloader-config": {
         "main-slice": "workload.slice",
-	"host-slice": "hostcritical.slice",
+        "host-slice": "hostcritical.slice",
         "side-slice": "sideload.slice",
 
-	"main-cpu-weight": "100",
+        "main-cpu-weight": "100",
         "host-cpu-weight": "10",
-	"side-cpu-weight": "1",
-	"main-io-weight": "400",
-	"host-io-weight": "100",
-	"side-io-weight": "1",
+        "side-cpu-weight": "1",
+        "main-io-weight": "400",
+        "host-io-weight": "100",
+        "side-io-weight": "1",
         "side-memory-high": "50%",
+        "side-swap-max": "50%",
 
-        "cpu-period": "5",
+        "cpu-headroom-period": "5",
         "cpu-headroom": "15",
-        "cpu-min-avail": "15",
+        "cpu-min-avail": "10",
+        "cpu-floor": "5",
         "cpu-throttle-period": "0.01",
 
+        "overload-cpu-duration": "10",
         "overload-mempressure-threshold": "5",
-        "overload-hold": "15",
-        "overload-hold-max": "180",
+        "overload-hold": "10",
+        "overload-hold-max": "30",
         "overload-hold-decay-rate": "0.5",
 
         "critical-swapfree-threshold": "25%",
         "critical-mempressure-threshold": "75",
         "critical-iopressure-threshold": "75",
 
-	"scribe-category": "perfpipe_htejun_resctl_sideload",
-	"scribe-interval": "10"
+        "scribe-category": "perfpipe_htejun_resctl_sideload",
+        "scribe-interval": "10"
     }
 }

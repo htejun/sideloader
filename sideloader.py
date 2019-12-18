@@ -100,6 +100,11 @@ def parse_size_or_pct(s, whole):
     else:
         return parse_size(s)
 
+def int_or_max(v, max_val):
+    if v == 'max':
+        return max_val
+    return int(v)
+
 def read_lines(path):
     with open(path, 'r', encoding='utf-8') as f:
         lines = f.read().strip().split('\n')
@@ -136,7 +141,17 @@ def read_meminfo():
             elif toks[0] == 'Hugetlb:':
                 hugetlb = int(toks[1]) * 1024
 
-    return mem_total, swap_total, swap_free, hugetlb
+    return mem_total, hugetlb, swap_total, swap_free
+
+def read_memswap(cgrp_dir):
+    mem_total, hugetlb, swap_total, swap_free = read_meminfo()
+    swap_max = int_or_max(read_first_line(f'{cgrp_dir}/memory.swap.max'),
+                          swap_total)
+    swap_cur = int(read_first_line(f'{cgrp_dir}/memory.swap.current'))
+    swap_avail = min(swap_total, swap_max)
+    swap_free = max(min(swap_avail - swap_cur, swap_free), 0)
+
+    return mem_total, hugetlb, swap_avail, swap_free
 
 def read_cgroup_keyed(path):
     content = {}
@@ -156,11 +171,6 @@ def read_cgroup_nested_keyed(path):
             nkey, val = tok.split('=')
             content[key][nkey] = val
     return content
-
-def float_or_max(v, max_val):
-    if v == 'max':
-        return max_val
-    return float(v)
 
 def dump_json(data, path):
     dirname, basename = os.path.split(path)
@@ -185,7 +195,7 @@ def time_interval_str(at, now):
 #
 class Config:
     def __init__(self, cfg):
-        mem_total, swap_total, swap_free, hugetlb = read_meminfo()
+        mem_total, hugetlb, swap_total, swap_free = read_meminfo()
 
         self.main_slice = cfg['main-slice']
         self.host_slice = cfg['host-slice']
@@ -197,18 +207,22 @@ class Config:
         self.host_io_weight = int(cfg['host-io-weight'])
         self.side_io_weight = int(cfg['side-io-weight'])
         self.side_memory_high = parse_size_or_pct(cfg['side-memory-high'], mem_total)
-        self.cpu_period = float(cfg['cpu-period'])
+        self.side_swap_max = parse_size_or_pct(cfg['side-swap-max'], swap_total)
+        self.cpu_headroom_period = float(cfg['cpu-headroom-period'])
         self.cpu_headroom = float(cfg['cpu-headroom'])
         self.cpu_min_avail = float(cfg['cpu-min-avail'])
+        self.cpu_floor = float(cfg['cpu-floor'])
         self.cpu_throttle_period = float(cfg['cpu-throttle-period'])
 
+        self.ov_cpu_duration = float(cfg['overload-cpu-duration'])
         self.ov_memp_thr = float(cfg['overload-mempressure-threshold'])
         self.ov_hold = float(cfg['overload-hold'])
         self.ov_hold_max = float(cfg['overload-hold-max'])
         self.ov_hold_decay = float(cfg['overload-hold-decay-rate'])
 
         self.crit_swapfree_thr = \
-            parse_size_or_pct(cfg['critical-swapfree-threshold'], swap_total)
+            parse_size_or_pct(cfg['critical-swapfree-threshold'],
+                              min(self.side_swap_max, swap_total))
         self.crit_memp_thr = float(cfg['critical-mempressure-threshold'])
         self.crit_iop_thr = float(cfg['critical-iopressure-threshold'])
 
@@ -321,6 +335,10 @@ class SysInfo:
         self.memp_5min = 0
         self.iop_1min = 0
         self.iop_5min = 0
+        self.mem_total = 0
+        self.hugetlb = 0
+        self.swap_avail = 0
+        self.swap_free = 0
         self.swap_free_pct = 100
         self.critical = False
         self.critical_why = None
@@ -330,11 +348,13 @@ class SysInfo:
     def update(self):
         global config
 
+        side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
+
         # cpu stats
         cpu_idle, cpu_total = read_cpu_idle()
         cpu_total = cpu_total / USER_HZ * 1_000_000
         cpu_idle = cpu_idle / USER_HZ * 1_000_000
-        cpu_stat = read_cgroup_keyed(f'{CGRP_BASE}/{config.side_slice}/cpu.stat')
+        cpu_stat = read_cgroup_keyed(f'{side_cgrp}/cpu.stat')
         cpu_side = float(cpu_stat['usage_usec'])
 
         next_idx = (self.cpu_hist_idx + 1) % len(self.cpu_idle_hist)
@@ -353,10 +373,11 @@ class SysInfo:
         self.iop_5min = float(pres['full']['avg300'])
 
         # swap
-        mem_total, self.swap_total, self.swap_free, huge_tlb = read_meminfo()
+        (self.mem_total, self.hugetlb,
+         self.swap_avail, self.swap_free) = read_memswap(side_cgrp)
         self.swap_free_pct = 100
-        if self.swap_total:
-            self.swap_free_pct = self.swap_free / self.swap_total * 100
+        if self.swap_avail:
+            self.swap_free_pct = self.swap_free / self.swap_avail * 100
 
     def __cpu_lridx(self, nr_intvs):
         assert nr_intvs > 0 and nr_intvs < len(self.cpu_idle_hist)
@@ -422,7 +443,7 @@ class SysChecker:
         self.root_dev = None
         self.root_devnr = None
         self.mem_total = 0
-        self.swap_total = 0
+        self.swap_avail = 0
         self.swap_free = 0
         self.swappiness = 0
         self.hugetlb = 0
@@ -479,10 +500,20 @@ class SysChecker:
         return ['async discard disabled on root fs, enabled']
 
     def __check_memswap(self):
-        self.mem_total, self.swap_total, self.swap_free, self.hugetlb = read_meminfo()
+        global config
+
         warns = []
-        if self.swap_total < 0.9 * (self.mem_total / 2):
-            warns.append('swap is smaller than half of physical memory')
+
+        (self.mem_total, self.hugetlb,
+         self.swap_avail, self.swap_free) = read_memswap(self.side_cgrp)
+
+        if self.swap_avail < 0.9 * (self.mem_total / 4):
+            warns.append(f'available swap ({self.swap_avail/(1<<30):.2f}G) '
+                         f'is smaller than 1/4 of physical memory')
+
+        if self.swap_avail < 0.9 * config.side_swap_max:
+            warns.append(f'available swap ({self.swap_avail/(1<<30):.2f}G) '
+                         f'is smaller than side-swap-max')
 
         self.swappiness = int(read_first_line('/proc/sys/vm/swappiness'))
         if self.swappiness < 60:
@@ -523,7 +554,7 @@ class SysChecker:
             for subdir in ('', 'workload-tw.slice/', 'workload-tw.slice/*.task/',
                            'workload-tw.slice/*.task/task/'):
                 for path in main_path.glob(f'{subdir}memory.low'):
-                    low = int(float_or_max(read_first_line(path), self.mem_total))
+                    low = int_or_max(read_first_line(path), self.mem_total)
                     if low < (self.mem_total - self.hugetlb) / 3:
                         if main_memory_low:
                             warns.append(f'{str(path)} is lower than a third of system '
@@ -557,7 +588,8 @@ class SysChecker:
 
         try:
             subprocess.check_call(['systemctl', 'set-property', config.side_slice,
-                                   f'MemoryHigh={config.side_memory_high}'])
+                                   f'MemoryHigh={config.side_memory_high}',
+                                   f'MemorySwapMax={config.side_swap_max}'])
             with open(f'{self.side_cgrp}/memory.high', 'w') as f:
                 f.write(f'{config.side_memory_high}')
         except Exception as e:
@@ -917,7 +949,9 @@ jobs_pending = {}
 jobs = {}
 now = time.time()
 
-nr_cpu_hist_intvs = math.ceil(config.cpu_period / interval)
+nr_cpu_headroom_intvs = math.ceil(config.cpu_headroom_period / interval)
+nr_cpu_overload_intvs = math.ceil(config.ov_cpu_duration / interval)
+nr_cpu_hist_intvs = max(nr_cpu_headroom_intvs, nr_cpu_overload_intvs)
 sysinfo = SysInfo(f'{CGRP_BASE}/{config.side_slice}', nr_cpu_hist_intvs)
 syschecker = SysChecker()
 
@@ -973,21 +1007,25 @@ while True:
                             '--unit', job.svc_name, job.cmd])
         jobs_pending = {}
 
-    # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
-    syschecker.periodic_check(10 if len(jobs) > 0 else 60, now)
-
     # Read the current system state
     sysinfo.update()
 
-    cpu_avg_idle = sysinfo.cpu_avg_idle(nr_cpu_hist_intvs)
-    cpu_min_idle, cpu_max_idle = sysinfo.cpu_min_max_idle(nr_cpu_hist_intvs)
-    cpu_avg_side = sysinfo.cpu_avg_side(nr_cpu_hist_intvs)
-    cpu_avail = max(cpu_avg_side + cpu_min_idle - config.cpu_headroom,
-                    config.cpu_min_avail)
+    # Do syscfg check every 10 secs if there are jobs; otherwise, every 60s
+    syschecker.periodic_check(10 if len(jobs) > 0 else 60, now)
+
+    cpu_cur_idle = min(sysinfo.cpu_avg_idle(nr_cpu_headroom_intvs),
+                       sysinfo.cpu_avg_idle(1))
+    cpu_cur_side = max(sysinfo.cpu_avg_side(nr_cpu_headroom_intvs),
+                       sysinfo.cpu_avg_side(1))
+    cpu_avail = max(cpu_cur_side + cpu_cur_idle - config.cpu_headroom,
+                    config.cpu_floor)
+
+    cpu_avg_idle = sysinfo.cpu_avg_idle(nr_cpu_overload_intvs)
+    cpu_avg_side = sysinfo.cpu_avg_side(nr_cpu_overload_intvs)
 
     # Handle critical condition
     if sysinfo.swap_free <= config.crit_swapfree_thr:
-        critical_why = (f'swap-free {self.swap_free>>20}MB is lower than '
+        critical_why = (f'swap-left {sysinfo.swap_free>>20}MB is lower than '
                         f'critical threshold {config.crit_swapfree_thr>>20}MB')
     elif sysinfo.memp_5min >= config.crit_memp_thr:
         critical_why = (f'5min memory pressure {self.memp_5min:.2f} is higher than '
@@ -1000,6 +1038,7 @@ while True:
 
     if critical_why is not None:
         if critical_at is None:
+            log(f'CRITICAL: {critical_why}')
             crtical_at = now
         if overload_at is None:
             overload_at = now
@@ -1007,7 +1046,8 @@ while True:
         overload_hold = config.ov_hold_max
         for jobid, job in jobs.items():
             job.kill(f'resource critical {critical_why}')
-    else:
+    elif critical_at is not None:
+        log(f'CRITICAL: end, resuming normal operation')
         critical_at = None
 
     # Handle overload condition
@@ -1027,7 +1067,7 @@ while True:
             overload_at = now
             overload_hold = min(config.ov_hold + overload_hold, config.ov_hold_max)
         overload_hold_from = now
-    elif overload_at:
+    elif overload_at is not None:
         if now > overload_hold_from + overload_hold:
             log('OVERLOAD: end, resuming normal operation')
             overload_at = None
@@ -1078,7 +1118,8 @@ while True:
                 'path': job.jobfile.path,
             } for jobid, job in jobs_pending.items() ],
             'sysinfo': {
-                'cpu-min-idle': f'{cpu_min_idle:.2f}',
+                'cpu-cur-idle': f'{cpu_cur_idle:.2f}',
+                'cpu-cur-side': f'{cpu_cur_side:.2f}',
                 'cpu-avg-idle': f'{cpu_avg_idle:.2f}',
                 'cpu-avg-side': f'{cpu_avg_side:.2f}',
                 'cpu-avail': f'{cpu_avail:.2f}',
@@ -1086,6 +1127,7 @@ while True:
                 'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
                 'iopressure-1min': f'{sysinfo.iop_1min:.2f}',
                 'iopressure-5min': f'{sysinfo.iop_5min:.2f}',
+                'swap-avail-gb': f'{sysinfo.swap_avail/(1<<30):.2f}',
                 'swap-free-pct': f'{sysinfo.swap_free_pct:.2f}',
             },
             'overload': {
@@ -1111,7 +1153,8 @@ while True:
                 'nr-pending-jobs': len(jobs_pending),
             },
             'float': {
-                'cpu-min-idle': cpu_min_idle,
+                'cpu-cur-idle': cpu_cur_idle,
+                'cpu-cur-side': cpu_cur_side,
                 'cpu-avg-idle': cpu_avg_idle,
                 'cpu-avg-side': cpu_avg_side,
                 'cpu-avail': cpu_avail,
