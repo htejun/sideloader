@@ -1,0 +1,9 @@
+{
+    "sideloader-jobs": [
+	{
+	    "id": "dlxu-memory-growth",
+	    "cmd": "/root/sideload/dlxu-memory-growth.sh",
+	    "frozen-expiration": "300"
+	}
+    ]
+}
