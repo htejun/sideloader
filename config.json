@@ -11,21 +11,21 @@
         "host-io-weight": "100",
         "side-io-weight": "1",
         "side-memory-high": "50%",
-        "side-swap-max": "50%",
+        "side-swap-max": "25%",
 
         "cpu-headroom-period": "5",
-        "cpu-headroom": "15",
+        "cpu-headroom": "20",
         "cpu-min-avail": "10",
         "cpu-floor": "5",
         "cpu-throttle-period": "0.01",
 
         "overload-cpu-duration": "10",
-        "overload-mempressure-threshold": "5",
+        "overload-mempressure-threshold": "25",
         "overload-hold": "10",
         "overload-hold-max": "30",
         "overload-hold-decay-rate": "0.5",
 
-        "critical-swapfree-threshold": "25%",
+        "critical-swapfree-threshold": "10%",
         "critical-mempressure-threshold": "75",
         "critical-iopressure-threshold": "75",
 

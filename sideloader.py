@@ -1028,10 +1028,10 @@ while True:
         critical_why = (f'swap-left {sysinfo.swap_free>>20}MB is lower than '
                         f'critical threshold {config.crit_swapfree_thr>>20}MB')
     elif sysinfo.memp_5min >= config.crit_memp_thr:
-        critical_why = (f'5min memory pressure {self.memp_5min:.2f} is higher than '
+        critical_why = (f'5min memory pressure {sysinfo.memp_5min:.2f} is higher than '
                         f'critical threshold {config.crit_memp_thr:.2f}')
     elif sysinfo.iop_5min >= config.crit_iop_thr:
-        critical_why = (f'5min io pressure {self.iop_5min:.2f} is higher than '
+        critical_why = (f'5min io pressure {sysinfo.iop_5min:.2f} is higher than '
                         f'critical threshold {config.crit_iop_thr:.2f}')
     else:
         critical_why = None
@@ -1055,7 +1055,7 @@ while True:
     if side_margin < config.cpu_min_avail:
         overload_why = (f'cpu margin {side_margin:.2f} is too low')
     elif sysinfo.memp_1min >= config.ov_memp_thr:
-        overload_why = (f'1min memory pressure {self.memp_1min:.2f} is over '
+        overload_why = (f'1min memory pressure {sysinfo.memp_1min:.2f} is over '
                         f'the threshold {config.ov_memp_thr:.2f}')
     else:
         overload_why = None

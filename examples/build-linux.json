@@ -1,8 +1,8 @@
 {
     "sideloader-jobs": [
 	{
-	    "id": "test-build-job",
-	    "cmd": "/root/sideload/test-job.sh",
+	    "id": "build-linux",
+	    "cmd": "/root/sideload/build-linux.sh",
 	    "frozen-expiration": "300"
 	}
     ]
