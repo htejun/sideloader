@@ -1,0 +1,9 @@
+{
+    "sideloader-jobs": [
+	{
+	    "id": "io-bomb",
+	    "cmd": "/root/sideload/io-bomb.sh",
+	    "frozen-expiration": "300"
+	}
+    ]
+}
