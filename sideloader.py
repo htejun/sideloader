@@ -46,6 +46,10 @@ parser.add_argument('--status', default=dfl_status_file,
                     help='Status file (default: %(default)s)')
 parser.add_argument('--scribe', default=dfl_scribe_file,
                     help='Scribe input file (default: %(default)s)')
+parser.add_argument('--dev', metavar='DEV',
+                    help="Storage device detection override (e.g. sda, nvme0n1)")
+parser.add_argument('--dont-fix', action='store_true',
+                    help='Warn configuration issues but don\'t try to fix them')
 parser.add_argument('--verbose', '-v', action='count')
 
 args = parser.parse_args()
@@ -428,8 +432,9 @@ class SysInfo:
 
 class SysChecker:
     def __init__(self):
-        global config
+        global args, config
 
+        self.fix = not args.dont_fix
         self.main_cgrp = f'{CGRP_BASE}/{config.main_slice}'
         self.host_cgrp = f'{CGRP_BASE}/{config.host_slice}'
         self.side_cgrp = f'{CGRP_BASE}/{config.side_slice}'
@@ -449,23 +454,26 @@ class SysChecker:
         self.hugetlb = 0
 
         # find the root device maj/min
-        root_part = None
-        for line in read_lines('/proc/mounts'):
-            toks = line.split()
-            if toks[1] == '/':
-                if toks[0].startswith('/dev/'):
-                    root_part = toks[0][len('/dev/'):]
-                break
-        if root_part is None:
-            warn('SYSCFG: failed to find root mount')
-            return
+        if args.dev is None:
+            root_part = None
+            for line in read_lines('/proc/mounts'):
+                toks = line.split()
+                if toks[1] == '/':
+                    if toks[0].startswith('/dev/'):
+                        root_part = toks[0][len('/dev/'):]
+                    break
+            if root_part is None:
+                warn('SYSCFG: failed to find root mount')
+                return
 
-        if root_part.startswith('sd'):
-            self.root_dev = re.sub(r'^(sd[^0-9]*)[0-9]*$', r'\1', root_part)
-        elif root_part.startswith('nvme'):
-            self.root_dev = re.sub(r'^(nvme[^p]*)(p[0-9])?$', r'\1', root_part)
+            if root_part.startswith('sd'):
+                self.root_dev = re.sub(r'^(sd[^0-9]*)[0-9]*$', r'\1', root_part)
+            elif root_part.startswith('nvme'):
+                self.root_dev = re.sub(r'^(nvme[^p]*)(p[0-9])?$', r'\1', root_part)
+            else:
+                raise Exception(f'unknown device {root_part}')
         else:
-            raise Exception(f'unknown device')
+            self.root_dev = args.dev
 
         try:
             out = subprocess.run(['stat', '-c', '0x%t 0x%T', f'/dev/{self.root_dev}'],
@@ -491,13 +499,17 @@ class SysChecker:
         if 'discard=async' in toks[3]:
             return []
 
-        try:
-            subprocess.check_call(['mount', '-o', 'remount,discard=async', '/'])
-        except Exception as e:
-            return [f'failed to enable async discard on root fs ({e})']
+        fixed = ''
+        if self.fix:
+            try:
+                subprocess.check_call(['mount', '-o', 'remount,discard=async', '/'])
+            except Exception as e:
+                return [f'failed to enable async discard on root fs ({e})']
 
-        self.fixed = True
-        return ['async discard disabled on root fs, enabled']
+            self.fixed = True
+            fixed = ', enabled'
+
+        return [f'async discard disabled on root fs{fixed}']
 
     def __check_memswap(self):
         global config
@@ -536,10 +548,13 @@ class SysChecker:
                 latcfg = read_cgroup_nested_keyed(path)
                 if self.root_devnr not in latcfg:
                     continue
-                warns.append(f'{str(path)} has non-null config, fixing...')
-                with path.open('w') as f:
-                    f.write(f'{self.root_devnr} target=0')
-                self.fixed = True
+                fixed = ''
+                if self.fix:
+                    with path.open('w') as f:
+                        f.write(f'{self.root_devnr} target=0')
+                    self.fixed = True
+                    fixed = ', disabled'
+                warns.append(f'{str(path)} has non-null config{fixed}')
             except Exception as e:
                 warns.append(f'failed to check and disable {str(path)} ({e})')
         return warns
@@ -557,15 +572,18 @@ class SysChecker:
                     low = int_or_max(read_first_line(path), self.mem_total)
                     if low < (self.mem_total - self.hugetlb) / 3:
                         if main_memory_low:
+                            fixed = ''
+                            if self.fix:
+                                try:
+                                    with path.open('w') as f:
+                                        f.write(f'{main_memory_low}')
+                                except Exception as e:
+                                    warns.append(f'Failed to set {str(path)} to {main_memory_low} ({e})')
+                                else:
+                                    self.fixed = True
+                                    fixed = f', configured to {main_memory_low}'
                             warns.append(f'{str(path)} is lower than a third of system '
-                                         f'memory, configuring to {main_memory_low}')
-                            try:
-                                with path.open('w') as f:
-                                    f.write(f'{main_memory_low}')
-                            except Exception as e:
-                                warns.append(f'failed to set {str(path)} to {main_memory_low} ({e})')
-                            else:
-                                self.fixed = True
+                                         f'memory{fixed}')
                         else:
                             warns.append(f'{str(path)} is lower than a third of system '
                                          f'memory, no idea what to config')
@@ -586,16 +604,17 @@ class SysChecker:
         except Exception as e:
             warns.append(f'failed to check {config.side_slice} memory.high ({e})')
 
-        try:
-            subprocess.check_call(['systemctl', 'set-property', config.side_slice,
-                                   f'MemoryHigh={config.side_memory_high}',
-                                   f'MemorySwapMax={config.side_swap_max}'])
-            with open(f'{self.side_cgrp}/memory.high', 'w') as f:
-                f.write(f'{config.side_memory_high}')
-        except Exception as e:
-            warns.append(f'failed to set {config.side_slice} resource configs ({e})')
-        else:
-            self.fixed = True
+        if self.fix:
+            try:
+                subprocess.check_call(['systemctl', 'set-property', config.side_slice,
+                                       f'MemoryHigh={config.side_memory_high}',
+                                       f'MemorySwapMax={config.side_swap_max}'])
+                with open(f'{self.side_cgrp}/memory.high', 'w') as f:
+                    f.write(f'{config.side_memory_high}')
+            except Exception as e:
+                warns.append(f'Failed to set {config.side_slice} resource configs ({e})')
+            else:
+                self.fixed = True
         return warns
 
     def __check_weight(self, slice, knob, weight, prefix=None):
@@ -620,14 +639,14 @@ class SysChecker:
                 else:
                     f.write(f'{weight}')
         except Exception as e:
-            return[f'failed to set {slice}/{knob} to {weight} ({e})']
+            return[f'Failed to set {slice}/{knob} to {weight} ({e})']
 
         if systemd_key:
             try:
                 subprocess.check_call(['systemctl', 'set-property', slice,
                                        f'{systemd_key}={weight}'])
             except Exception as e:
-                return [f'failed to set {slice} {systemd_key} to {weight} ({e})']
+                return [f'Failed to set {slice} {systemd_key} to {weight} ({e})']
 
         return []
 
@@ -731,13 +750,13 @@ class SysChecker:
         warns = self.__check_cpu_weights()
         # Enabling CPU controller carries significant overhead.  Fix
         # it iff there are active side jobs.
-        if len(warns) and self.active:
+        if self.fix and len(warns) and self.active:
             warns.append('Fixing cpu.weights')
             warns += self.__fix_cpu_weights()
         self.warns += warns
 
         warns = self.__check_io_weights()
-        if len(warns):
+        if self.fix and len(warns):
             warns.append('Fixing io.weights')
             warns += self.__fix_io_weights()
         self.warns += warns
@@ -792,6 +811,7 @@ class Scriber:
         self.interval = intv
         self.last_at = 0
         self.scribe_proc = None
+        self.disabled = False
 
     def should_log(self, now):
         if int(now) - int(self.last_at) < self.interval:
@@ -803,10 +823,16 @@ class Scriber:
         return True
 
     def log(self, msg, now):
+        if self.disabled:
+            return
         self.last_at = now
         if self.scribe_proc:
             self.scribe_proc.wait()
-        self.scribe_proc = subprocess.Popen(['scribe_cat', self.category, msg])
+        try:
+            self.scribe_proc = subprocess.Popen(['scribe_cat', self.category, msg])
+        except Exception as e:
+            warn(f'Failed to run scribe_cat ({e}), disabling scribe logging')
+            self.disabled = True
 
 #
 # Implementation
