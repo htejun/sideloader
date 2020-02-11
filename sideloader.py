@@ -187,12 +187,12 @@ def svc_to_jobid(svc):
     assert svc.startswith(SL_PREFIX) and svc.endswith(SVC_SUFFIX)
     return svc[len(SL_PREFIX):-len(SVC_SUFFIX)]
 
-def time_interval_str(at, now):
+def time_interval(at, now):
     if at is None:
-        return '0'
+        return 0
     else:
         intv = max(int(now - at), 1)
-        return f'{intv:.2f}'
+        return intv
 
 #
 # Classes
@@ -1134,9 +1134,9 @@ while True:
                 'path' : job.jobfile.path,
                 'service-name': job.svc_name,
                 'service-status': job.svc_status,
-                'frozen-for': time_interval_str(job.frozen_at, now),
-                'is-killed': f'{int(job.killed)}',
-                'is-done': f'{int(job.done)}',
+                'frozen-for': time_interval(job.frozen_at, now),
+                'is-killed': int(job.killed),
+                'is-done': int(job.done),
                 'kill-why': f'{job.kill_why if job.kill_why else ""}',
             } for jobid, job in jobs.items() ],
             'jobs-pending': [ {
@@ -1144,22 +1144,22 @@ while True:
                 'path': job.jobfile.path,
             } for jobid, job in jobs_pending.items() ],
             'sysinfo': {
-                'cpu-cur-idle': f'{cpu_cur_idle:.2f}',
-                'cpu-cur-side': f'{cpu_cur_side:.2f}',
-                'cpu-avg-idle': f'{cpu_avg_idle:.2f}',
-                'cpu-avg-side': f'{cpu_avg_side:.2f}',
-                'cpu-avail': f'{cpu_avail:.2f}',
-                'mempressure-1min': f'{sysinfo.memp_1min:.2f}',
-                'mempressure-5min': f'{sysinfo.memp_5min:.2f}',
-                'iopressure-1min': f'{sysinfo.iop_1min:.2f}',
-                'iopressure-5min': f'{sysinfo.iop_5min:.2f}',
-                'swap-avail-gb': f'{sysinfo.swap_avail/(1<<30):.2f}',
-                'swap-free-pct': f'{sysinfo.swap_free_pct:.2f}',
+                'cpu-cur-idle': cpu_cur_idle,
+                'cpu-cur-side': cpu_cur_side,
+                'cpu-avg-idle': cpu_avg_idle,
+                'cpu-avg-side': cpu_avg_side,
+                'cpu-avail': cpu_avail,
+                'mempressure-1min': sysinfo.memp_1min,
+                'mempressure-5min': sysinfo.memp_5min,
+                'iopressure-1min': sysinfo.iop_1min,
+                'iopressure-5min': sysinfo.iop_5min,
+                'swap-avail-gb': sysinfo.swap_avail/(1<<30),
+                'swap-free-pct': sysinfo.swap_free_pct,
             },
             'overload': {
-                'critical-for': time_interval_str(critical_at, now),
-                'overload-for': time_interval_str(overload_at, now),
-                'overload-hold': f'{max(overload_hold_from + overload_hold - now, 0):.2f}',
+                'critical-for': time_interval(critical_at, now),
+                'overload-for': time_interval(overload_at, now),
+                'overload-hold': max(overload_hold_from + overload_hold - now, 0),
                 'critical-why': f'{critical_why if critical_why else ""}',
                 'overload-why': f'{overload_why if overload_why else ""}',
             }
