@@ -46,7 +46,7 @@ parser.add_argument('--status', default=dfl_status_file,
                     help='Status file (default: %(default)s)')
 parser.add_argument('--scribe', default=dfl_scribe_file,
                     help='Scribe input file (default: %(default)s)')
-parers.add_argument('--svc-prefix', default=dfl_svc_prefix,
+parser.add_argument('--svc-prefix', default=dfl_svc_prefix,
                     help='Sideload service name prefix (default: %(default))')
 parser.add_argument('--dev', metavar='DEV',
                     help='Storage device detection override (e.g. sda, nvme0n1)')
@@ -264,7 +264,7 @@ class Job:
 
         self.jobfile = jobfile
         self.jobid = jobid
-        self.cmd = cfg['cmd']
+        self.args = cfg['args']
         self.frozen_exp = frozen_exp
         self.frozen_at = None
         self.done = False
@@ -272,6 +272,7 @@ class Job:
         self.killed = False
         self.svc_name = f'{args.svc_prefix}{jobid}{SVC_SUFFIX}'
         self.svc_status = None
+        self.working_dir = cfg['working-dir'] if 'working-dir' in cfg else None;
 
     def update_frozen(self, freeze, now):
         changed = False
@@ -788,26 +789,29 @@ class SysChecker:
             self.check(now)
 
     def update_active(self, active):
+        global args
+
         active = bool(active)
         if self.active == active:
             return
 
-        if active:
-            log('SYSCFG: overriding root slice DisableControllers')
-            try:
-                with open(systemd_root_override_file, 'w') as f:
-                    f.write('[Slice]\n'
-                            'DisableControllers=\n')
-                subprocess.check_call(['systemctl', 'daemon-reload'])
-            except Exception as e:
-                warn(f'SYSCFG: failed to overried root slice DisableControllers ({e})')
-        else:
-            log('SYSCFG: reverting root slice DisableControllers')
-            try:
-                os.remove(systemd_root_override_file)
-                subprocess.check_call(['systemctl', 'daemon-reload'])
-            except Exception as e:
-                warn(f'SYSCFG: failed to revert root slice DisableControllers ({e})')
+        if not args.dont_fix:
+            if active:
+                log('SYSCFG: overriding root slice DisableControllers')
+                try:
+                    with open(systemd_root_override_file, 'w') as f:
+                        f.write('[Slice]\n'
+                                'DisableControllers=\n')
+                    subprocess.check_call(['systemctl', 'daemon-reload'])
+                except Exception as e:
+                    warn(f'SYSCFG: failed to overried root slice DisableControllers ({e})')
+            else:
+                log('SYSCFG: reverting root slice DisableControllers')
+                try:
+                    os.remove(systemd_root_override_file)
+                    subprocess.check_call(['systemctl', 'daemon-reload'])
+                except Exception as e:
+                    warn(f'SYSCFG: failed to revert root slice DisableControllers ({e})')
 
         self.active = active
 
@@ -1034,9 +1038,12 @@ while True:
             log(f'JOB: Starting {job.svc_name}')
             jobs[jobid] = job
             syschecker.update_active(count_active_jobs(jobs))
-            subprocess.run(['systemd-run', '-r', '-p', 'TimeoutStopSec=5',
-                            '--slice', config.side_slice,
-                            '--unit', job.svc_name, job.cmd])
+            cmd = ['systemd-run', '-r', '-p', 'TimeoutStopSec=5',
+                   '--slice', config.side_slice, '--unit', job.svc_name]
+            if job.working_dir is not None:
+                cmd += ['--working-directory', job.working_dir]
+            cmd += job.args
+            subprocess.run(cmd)
         jobs_pending = {}
 
     # Read the current system state

@@ -2,7 +2,7 @@
     "sideloader-jobs": [
 	{
 	    "id": "build-linux",
-	    "cmd": "/root/sideload/build-linux.sh",
+	    "args": [ "/root/sideload/build-linux.sh" ],
 	    "frozen-expiration": "300"
 	}
     ]
