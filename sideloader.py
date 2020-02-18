@@ -21,12 +21,12 @@ interval = 1
 USER_HZ = os.sysconf(os.sysconf_names['SC_CLK_TCK'])
 CGRP_BASE = '/sys/fs/cgroup'
 SL_BASE = '/var/lib/sideloader'
-SL_PREFIX = 'sideload-'
 SVC_SUFFIX = '.service'
 dfl_cfg_file = SL_BASE + '/config.json'
 dfl_job_dir = SL_BASE + '/jobs.d'
 dfl_status_file = SL_BASE + '/status.json'
 dfl_scribe_file = SL_BASE + '/scribe.json'
+dfl_svc_prefix = 'sideload-'
 systemd_root_override_file = '/etc/systemd/system/-.slice.d/zz-sideloader-disable-controller-override.conf'
 
 description = '''
@@ -46,8 +46,10 @@ parser.add_argument('--status', default=dfl_status_file,
                     help='Status file (default: %(default)s)')
 parser.add_argument('--scribe', default=dfl_scribe_file,
                     help='Scribe input file (default: %(default)s)')
+parers.add_argument('--svc-prefix', default=dfl_svc_prefix,
+                    help='Sideload service name prefix (default: %(default))')
 parser.add_argument('--dev', metavar='DEV',
-                    help="Storage device detection override (e.g. sda, nvme0n1)")
+                    help='Storage device detection override (e.g. sda, nvme0n1)')
 parser.add_argument('--dont-fix', action='store_true',
                     help='Warn configuration issues but don\'t try to fix them')
 parser.add_argument('--verbose', '-v', action='count')
@@ -184,8 +186,10 @@ def dump_json(data, path):
     os.rename(tf.name, path)
 
 def svc_to_jobid(svc):
-    assert svc.startswith(SL_PREFIX) and svc.endswith(SVC_SUFFIX)
-    return svc[len(SL_PREFIX):-len(SVC_SUFFIX)]
+    global args
+
+    assert svc.startswith(args.svc_prefix) and svc.endswith(SVC_SUFFIX)
+    return svc[len(args.svc_prefix):-len(SVC_SUFFIX)]
 
 def time_interval(at, now):
     if at is None:
@@ -248,6 +252,8 @@ class JobFile:
 
 class Job:
     def __init__(self, cfg, jobfile):
+        global args
+
         jobid = cfg['id']
         if not re.search('^[A-Za-z0-9-_.]*$', jobid):
             raise Exception(f'"{jobid}" is not a valid identifier')
@@ -264,7 +270,7 @@ class Job:
         self.done = False
         self.kill_why = None
         self.killed = False
-        self.svc_name = f'{SL_PREFIX}{jobid}{SVC_SUFFIX}'
+        self.svc_name = f'{args.svc_prefix}{jobid}{SVC_SUFFIX}'
         self.svc_status = None
 
     def update_frozen(self, freeze, now):
@@ -838,15 +844,15 @@ class Scriber:
 # Implementation
 #
 def list_side_services():
-    global config
+    global config, args
 
-    out = subprocess.run(['systemctl', 'list-units', '-l', SL_PREFIX + '*'],
+    out = subprocess.run(['systemctl', 'list-units', '-l', args.svc_prefix + '*'],
                          stdout=subprocess.PIPE).stdout.decode('utf-8')
     svcs = []
     for line in out.split('\n'):
         toks = line[2:].split();
         if len(toks) and \
-           toks[0].startswith(SL_PREFIX) and toks[0].endswith(SVC_SUFFIX):
+           toks[0].startswith(args.svc_prefix) and toks[0].endswith(SVC_SUFFIX):
             svcs.append(toks[0])
     return svcs
 

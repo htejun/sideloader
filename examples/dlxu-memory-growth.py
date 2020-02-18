@@ -1,14 +1,14 @@
-#!/bin/python
+#!/bin/python3
 
 import datetime
 import gc
 import os
 import resource
+import sys
 import time
 
+BPS = int(sys.argv[1]) << 20
 PAGE_SIZE = resource.getpagesize()
-ALLOCATION = int(os.environ.get('ALLOCATION', 5 * (10 ** 9)))
-FRAC_PER_LOOP = float(os.environ.get('FRAC_PER_LOOP', 1 / float(10)))
 
 def get_memory_usage():
     return int(open("/proc/self/statm", "rt").read().split()[1]) * PAGE_SIZE
@@ -26,15 +26,11 @@ def run():
     prev_time = datetime.datetime.now()
     while True:
         # allocate some memory
-        if get_memory_usage() < ALLOCATION:
-            l = bloat(ALLOCATION * FRAC_PER_LOOP)
-            arr.append(l)
-            now = datetime.datetime.now()
-            print("{} -- RSS = {} bytes. Delta = {}".format(now, get_memory_usage(), (now - prev_time).total_seconds()))
-            prev_time = now
-        else:
-            break
-
+        l = bloat(BPS)
+        arr.append(l)
+        now = datetime.datetime.now()
+        print("{} -- RSS = {} bytes. Delta = {}".format(now, get_memory_usage(), (now - prev_time).total_seconds()))
+        prev_time = now
         time.sleep(1)
 
     print('{} -- Done with workload'.format(datetime.datetime.now()))
