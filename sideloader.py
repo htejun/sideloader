@@ -205,38 +205,38 @@ class Config:
     def __init__(self, cfg):
         mem_total, hugetlb, swap_total, swap_free = read_meminfo()
 
-        self.main_slice = cfg['main-slice']
-        self.host_slice = cfg['host-slice']
-        self.side_slice = cfg['side-slice']
-        self.main_cpu_weight = int(cfg['main-cpu-weight'])
-        self.host_cpu_weight = int(cfg['host-cpu-weight'])
-        self.side_cpu_weight = int(cfg['side-cpu-weight'])
-        self.main_io_weight = int(cfg['main-io-weight'])
-        self.host_io_weight = int(cfg['host-io-weight'])
-        self.side_io_weight = int(cfg['side-io-weight'])
-        self.side_memory_high = parse_size_or_pct(cfg['side-memory-high'], mem_total)
-        self.side_swap_max = parse_size_or_pct(cfg['side-swap-max'], swap_total)
-        self.cpu_headroom_period = float(cfg['cpu-headroom-period'])
-        self.cpu_headroom = float(cfg['cpu-headroom'])
-        self.cpu_min_avail = float(cfg['cpu-min-avail'])
-        self.cpu_floor = float(cfg['cpu-floor'])
-        self.cpu_throttle_period = float(cfg['cpu-throttle-period'])
+        self.main_slice = cfg['main_slice']
+        self.host_slice = cfg['host_slice']
+        self.side_slice = cfg['side_slice']
+        self.main_cpu_weight = int(cfg['main_cpu_weight'])
+        self.host_cpu_weight = int(cfg['host_cpu_weight'])
+        self.side_cpu_weight = int(cfg['side_cpu_weight'])
+        self.main_io_weight = int(cfg['main_io_weight'])
+        self.host_io_weight = int(cfg['host_io_weight'])
+        self.side_io_weight = int(cfg['side_io_weight'])
+        self.side_memory_high = parse_size_or_pct(cfg['side_memory_high'], mem_total)
+        self.side_swap_max = parse_size_or_pct(cfg['side_swap_max'], swap_total)
+        self.cpu_headroom_period = float(cfg['cpu_headroom_period'])
+        self.cpu_headroom = float(cfg['cpu_headroom'])
+        self.cpu_min_avail = float(cfg['cpu_min_avail'])
+        self.cpu_floor = float(cfg['cpu_floor'])
+        self.cpu_throttle_period = float(cfg['cpu_throttle_period'])
 
-        self.ov_cpu_duration = float(cfg['overload-cpu-duration'])
-        self.ov_memp_thr = float(cfg['overload-mempressure-threshold'])
-        self.ov_hold = float(cfg['overload-hold'])
-        self.ov_hold_max = float(cfg['overload-hold-max'])
-        self.ov_hold_decay = float(cfg['overload-hold-decay-rate'])
+        self.ov_cpu_duration = float(cfg['overload_cpu_duration'])
+        self.ov_memp_thr = float(cfg['overload_mempressure_threshold'])
+        self.ov_hold = float(cfg['overload_hold'])
+        self.ov_hold_max = float(cfg['overload_hold_max'])
+        self.ov_hold_decay = float(cfg['overload_hold_decay_rate'])
 
         self.crit_swapfree_thr = \
-            parse_size_or_pct(cfg['critical-swapfree-threshold'],
+            parse_size_or_pct(cfg['critical_swapfree_threshold'],
                               min(self.side_swap_max, swap_total))
-        self.crit_memp_thr = float(cfg['critical-mempressure-threshold'])
-        self.crit_iop_thr = float(cfg['critical-iopressure-threshold'])
+        self.crit_memp_thr = float(cfg['critical_mempressure_threshold'])
+        self.crit_iop_thr = float(cfg['critical_iopressure_threshold'])
 
-        if 'scribe-category' in cfg:
-            self.scribe_category = cfg['scribe-category']
-            self.scribe_interval = float(cfg['scribe-interval'])
+        if 'scribe_category' in cfg:
+            self.scribe_category = cfg['scribe_category']
+            self.scribe_interval = float(cfg['scribe_interval'])
         else:
             self.scribe_category = None
             self.scribe_interval = 1
@@ -259,8 +259,8 @@ class Job:
             raise Exception(f'"{jobid}" is not a valid identifier')
 
         frozen_exp = None
-        if 'frozen-expiration' in cfg:
-            frozen_exp = float(cfg['frozen-expiration'])
+        if 'frozen_expiration' in cfg:
+            frozen_exp = float(cfg['frozen_expiration'])
 
         self.jobfile = jobfile
         self.jobid = jobid
@@ -272,7 +272,7 @@ class Job:
         self.killed = False
         self.svc_name = f'{args.svc_prefix}{jobid}{SVC_SUFFIX}'
         self.svc_status = None
-        self.working_dir = cfg['working-dir'] if 'working-dir' in cfg else None;
+        self.working_dir = cfg['working_dir'] if 'working_dir' in cfg else None;
 
     def update_frozen(self, freeze, now):
         changed = False
@@ -917,7 +917,7 @@ def process_job_dir(jobfiles, jobs, now):
         jf_jobs = {}
         try:
             parsed = json.load(jf.fh)
-            for ent in parsed['sideloader-jobs']:
+            for ent in parsed['sideloader_jobs']:
                 job = Job(ent, jf)
                 if job.jobid in jobids or job.jobid in jf_jobids:
                     raise Exception(f'Duplicate job id {job.jobid}')
@@ -969,7 +969,7 @@ def config_cpu_max(pct):
         warn(f'Failed to configure {cpu_max_file} ({e})')
 
 # Run
-config = Config(json.load(open(args.config, 'r'))['sideloader-config'])
+config = Config(json.load(open(args.config, 'r'))['sideloader_config'])
 dbg(f'Config: {config.__dict__}')
 log(f'INIT: sideloads in {config.side_slice}, main workloads in {config.main_slice}')
 
@@ -1138,43 +1138,43 @@ while True:
         job.refresh_status(now)
 
     status = {
-        'sideloader-status': {
+        'sideloader_status': {
             'now': str(datetime.datetime.fromtimestamp(now)),
-            'sysconfig-warnings-at': str(datetime.datetime.fromtimestamp(syschecker.last_check_at)),
-            'sysconfig-warnings': syschecker.warns,
+            'sysconfig_warnings_at': str(datetime.datetime.fromtimestamp(syschecker.last_check_at)),
+            'sysconfig_warnings': syschecker.warns,
             'jobs': [ {
                 'id': jobid,
                 'path' : job.jobfile.path,
-                'service-name': job.svc_name,
-                'service-status': job.svc_status,
-                'frozen-for': time_interval(job.frozen_at, now),
-                'is-killed': int(job.killed),
-                'is-done': int(job.done),
-                'kill-why': f'{job.kill_why if job.kill_why else ""}',
+                'service_name': job.svc_name,
+                'service_status': job.svc_status,
+                'frozen_for': time_interval(job.frozen_at, now),
+                'is_killed': int(job.killed),
+                'is_done': int(job.done),
+                'kill_why': f'{job.kill_why if job.kill_why else ""}',
             } for jobid, job in jobs.items() ],
-            'jobs-pending': [ {
+            'jobs_pending': [ {
                 'id': jobid,
                 'path': job.jobfile.path,
             } for jobid, job in jobs_pending.items() ],
             'sysinfo': {
-                'cpu-cur-idle': cpu_cur_idle,
-                'cpu-cur-side': cpu_cur_side,
-                'cpu-avg-idle': cpu_avg_idle,
-                'cpu-avg-side': cpu_avg_side,
-                'cpu-avail': cpu_avail,
-                'mempressure-1min': sysinfo.memp_1min,
-                'mempressure-5min': sysinfo.memp_5min,
-                'iopressure-1min': sysinfo.iop_1min,
-                'iopressure-5min': sysinfo.iop_5min,
-                'swap-avail-gb': sysinfo.swap_avail/(1<<30),
-                'swap-free-pct': sysinfo.swap_free_pct,
+                'cpu_cur_idle': cpu_cur_idle,
+                'cpu_cur_side': cpu_cur_side,
+                'cpu_avg_idle': cpu_avg_idle,
+                'cpu_avg_side': cpu_avg_side,
+                'cpu_avail': cpu_avail,
+                'mempressure_1min': sysinfo.memp_1min,
+                'mempressure_5min': sysinfo.memp_5min,
+                'iopressure_1min': sysinfo.iop_1min,
+                'iopressure_5min': sysinfo.iop_5min,
+                'swap_avail_gb': sysinfo.swap_avail/(1<<30),
+                'swap_free_pct': sysinfo.swap_free_pct,
             },
             'overload': {
-                'critical-for': time_interval(critical_at, now),
-                'overload-for': time_interval(overload_at, now),
-                'overload-hold': max(overload_hold_from + overload_hold - now, 0),
-                'critical-why': f'{critical_why if critical_why else ""}',
-                'overload-why': f'{overload_why if overload_why else ""}',
+                'critical_for': time_interval(critical_at, now),
+                'overload_for': time_interval(overload_at, now),
+                'overload_hold': max(overload_hold_from + overload_hold - now, 0),
+                'critical_why': f'{critical_why if critical_why else ""}',
+                'overload_why': f'{overload_why if overload_why else ""}',
             }
         }
     }

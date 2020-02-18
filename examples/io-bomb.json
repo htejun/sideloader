@@ -1,9 +1,9 @@
 {
-    "sideloader-jobs": [
+    "sideloader_jobs": [
 	{
 	    "id": "io-bomb",
 	    "args": ["/root/sideload/io-bomb.sh"],
-	    "frozen-expiration": "300"
+	    "frozen_expiration": "300"
 	}
     ]
 }

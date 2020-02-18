@@ -1,9 +1,9 @@
 {
-    "sideloader-jobs": [
+    "sideloader_jobs": [
 	{
 	    "id": "build-linux",
 	    "args": [ "/root/sideload/build-linux.sh" ],
-	    "frozen-expiration": "300"
+	    "frozen_expiration": "300"
 	}
     ]
 }

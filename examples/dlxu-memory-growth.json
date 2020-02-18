@@ -1,9 +1,9 @@
 {
-    "sideloader-jobs": [
+    "sideloader_jobs": [
 	{
 	    "id": "dlxu-memory-growth",
 	    "args": ["/root/sideload/dlxu-memory-growth.py", "100"],
-	    "frozen-expiration": "300"
+	    "frozen_expiration": "300"
 	}
     ]
 }

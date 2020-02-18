@@ -1,35 +1,35 @@
 {
-    "sideloader-config": {
-        "main-slice": "workload.slice",
-        "host-slice": "hostcritical.slice",
-        "side-slice": "sideload.slice",
+    "sideloader_config": {
+        "main_slice": "workload.slice",
+        "host_slice": "hostcritical.slice",
+        "side_slice": "sideload.slice",
 
-        "main-cpu-weight": "100",
-        "host-cpu-weight": "10",
-        "side-cpu-weight": "1",
-        "main-io-weight": "400",
-        "host-io-weight": "100",
-        "side-io-weight": "1",
-        "side-memory-high": "50%",
-        "side-swap-max": "25%",
+        "main_cpu_weight": "100",
+        "host_cpu_weight": "10",
+        "side_cpu_weight": "1",
+        "main_io_weight": "400",
+        "host_io_weight": "100",
+        "side_io_weight": "1",
+        "side_memory_high": "50%",
+        "side_swap_max": "25%",
 
-        "cpu-headroom-period": "5",
-        "cpu-headroom": "20",
-        "cpu-min-avail": "10",
-        "cpu-floor": "5",
-        "cpu-throttle-period": "0.01",
+        "cpu_headroom_period": "5",
+        "cpu_headroom": "20",
+        "cpu_min_avail": "10",
+        "cpu_floor": "5",
+        "cpu_throttle_period": "0.01",
 
-        "overload-cpu-duration": "10",
-        "overload-mempressure-threshold": "25",
-        "overload-hold": "10",
-        "overload-hold-max": "30",
-        "overload-hold-decay-rate": "0.5",
+        "overload_cpu_duration": "10",
+        "overload_mempressure_threshold": "25",
+        "overload_hold": "10",
+        "overload_hold_max": "30",
+        "overload_hold_decay_rate": "0.5",
 
-        "critical-swapfree-threshold": "10%",
-        "critical-mempressure-threshold": "75",
-        "critical-iopressure-threshold": "75",
+        "critical_swapfree_threshold": "10%",
+        "critical_mempressure_threshold": "75",
+        "critical_iopressure_threshold": "75",
 
-        "scribe-category": "perfpipe_htejun_resctl_sideload",
-        "scribe-interval": "10"
+        "scribe_category": "perfpipe_htejun_resctl_sideload",
+        "scribe_interval": "10"
     }
 }
