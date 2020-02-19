@@ -3,7 +3,7 @@
 	{
 	    "id": "build-linux",
 	    "args": [ "/root/sideload/build-linux.sh" ],
-	    "frozen_expiration": "300"
+	    "frozen_expiration": 300
 	}
     ]
 }

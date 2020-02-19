@@ -3,7 +3,7 @@
 	{
 	    "id": "dlxu-memory-growth",
 	    "args": ["/root/sideload/dlxu-memory-growth.py", "100"],
-	    "frozen_expiration": "300"
+	    "frozen_expiration": 300
 	}
     ]
 }

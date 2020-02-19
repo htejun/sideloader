@@ -3,7 +3,7 @@
 	{
 	    "id": "io-bomb",
 	    "args": ["/root/sideload/io-bomb.sh"],
-	    "frozen_expiration": "300"
+	    "frozen_expiration": 300
 	}
     ]
 }
