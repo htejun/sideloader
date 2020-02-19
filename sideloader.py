@@ -100,7 +100,7 @@ def parse_size(s):
 # "1G128M" - 1 gigabyte and 128 megabytes, returns 1207959552 (bytes)
 # "35.7%"  - 35.7% of whole
 def parse_size_or_pct(s, whole):
-    s = s.strip()
+    s = str(s).strip()
     if s.endswith('%'):
         return int(whole * float(s[:-1]) / 100)
     else:
